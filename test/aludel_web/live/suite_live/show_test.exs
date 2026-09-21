@@ -1036,6 +1036,74 @@ defmodule Aludel.Web.SuiteLive.ShowTest do
       assert html =~ "Test case updated successfully"
     end
 
+    test "saves test case with typed judge JSON assertions", %{conn: conn} do
+      suite = suite_fixture()
+      test_case = test_case_fixture(%{suite_id: suite.id, variable_values: %{"name" => "Test"}})
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+
+      view
+      |> element("[phx-click='edit_test_case']")
+      |> render_click(%{"id" => test_case.id})
+
+      render_click(view, "toggle_assertion_mode", %{"id" => test_case.id})
+
+      typed_judge_assertion = %{
+        "type" => "typed_judge",
+        "kind" => "choice",
+        "question" => "What risk category best describes the output?",
+        "choices" => %{"safe" => nil, "pii" => "Personal data disclosure"},
+        "expected" => "safe",
+        "min_confidence" => 0.75
+      }
+
+      html =
+        view
+        |> form("#test-case-form-#{test_case.id}",
+          test_case: %{
+            id: test_case.id,
+            variable_values: %{"name" => "Test"},
+            assertions_json: Jason.encode!([typed_judge_assertion])
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Test case updated successfully"
+      assert Evals.get_test_case!(test_case.id).assertions == [typed_judge_assertion]
+    end
+
+    test "displays typed judge assertions and opens them in JSON mode", %{conn: conn} do
+      suite = suite_fixture()
+
+      typed_judge_assertion = %{
+        "type" => "typed_judge",
+        "kind" => "choice",
+        "question" => "What risk category best describes the output?",
+        "choices" => %{"safe" => nil, "pii" => "Personal data disclosure"},
+        "expected" => "safe",
+        "min_confidence" => 0.75
+      }
+
+      test_case =
+        test_case_fixture(%{
+          suite_id: suite.id,
+          variable_values: %{"name" => "Test"},
+          assertions: [typed_judge_assertion]
+        })
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0")
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0", "typed judge:")
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0", "safe")
+
+      view
+      |> element("[phx-click='edit_test_case']")
+      |> render_click(%{"id" => test_case.id})
+
+      assert has_element?(view, "#test_case_#{test_case.id}_assertions_json")
+    end
+
     test "rejects invalid JSON in assertions", %{conn: conn} do
       suite = suite_fixture()
       test_case = test_case_fixture(%{suite_id: suite.id})

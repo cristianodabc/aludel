@@ -350,6 +350,7 @@ defmodule Aludel.Web.SuiteLive.Show do
       |> assign(:editing_assertions, test_case.assertions)
       |> assign(:editing_test_case_params, form_params)
       |> assign(:test_case_form, to_form(TestCaseEditor.change_form(form_params), as: :test_case))
+      |> maybe_force_json_assertion_mode(id, test_case.assertions)
       |> allow_upload(:documents,
         accept: ~w(.pdf .png .jpg .jpeg .csv .json .txt),
         max_entries: 5,
@@ -1045,6 +1046,14 @@ defmodule Aludel.Web.SuiteLive.Show do
 
   defp display_value(value) when is_map(value) or is_list(value), do: Jason.encode!(value)
   defp display_value(value), do: to_string(value)
+
+  defp maybe_force_json_assertion_mode(socket, id, assertions) do
+    if Enum.any?(assertions, &(&1["type"] == "typed_judge")) do
+      assign(socket, :assertion_edit_mode, Map.put(socket.assigns.assertion_edit_mode, id, :json))
+    else
+      socket
+    end
+  end
 
   defp sync_editing_assertions(socket, assertions) do
     form_params =

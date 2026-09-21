@@ -123,6 +123,249 @@ defmodule Aludel.Evals.AssertionParserTest do
       assert assertion["template"] == "correctness"
     end
 
+    test "parses typed judge assertions in JSON mode" do
+      params = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "noul",
+              "question" => "Does the answer disclose personal data?",
+              "threshold" => 0.9
+            },
+            %{
+              "type" => "typed_judge",
+              "kind" => "choice",
+              "question" => "What risk category best describes the output?",
+              "choices" => %{"safe" => nil, "pii" => "Personal data disclosure"},
+              "expected" => "safe",
+              "min_confidence" => 0.75
+            },
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "How severe is the issue?",
+              "levels" => ["none", "minor", "major", "critical"],
+              "maximum" => "minor",
+              "min_confidence" => 0.7
+            }
+          ])
+      }
+
+      assert {:ok, assertions} = AssertionParser.parse(:json, params)
+      assert Enum.map(assertions, & &1["kind"]) == ["noul", "choice", "score"]
+    end
+
+    test "rejects malformed typed judge assertions" do
+      invalid_kind = %{
+        "assertions_json" =>
+          ~s([{"type":"typed_judge","kind":"unknown","question":"Classify this"}])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, invalid_kind)
+      assert message =~ "requires kind to be one of noul, choice, score"
+
+      blank_question = %{
+        "assertions_json" =>
+          ~s([{"type":"typed_judge","kind":"noul","question":" ","threshold":0.5}])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, blank_question)
+      assert message =~ "requires a non-blank question"
+
+      invalid_choice = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "choice",
+              "question" => "Classify this",
+              "choices" => %{"safe" => nil, "pii" => nil},
+              "expected" => "other"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, invalid_choice)
+      assert message =~ "expected to match a choice key"
+
+      invalid_score = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "Score this",
+              "levels" => ["none", "minor"],
+              "minimum" => "none",
+              "maximum" => "minor"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, invalid_score)
+      assert message =~ "requires exactly one of expected, minimum, or maximum"
+
+      invalid_confidence = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "choice",
+              "question" => "Classify this",
+              "choices" => %{"safe" => nil, "pii" => nil},
+              "expected" => "safe",
+              "min_confidence" => 1.1
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, invalid_confidence)
+      assert message =~ "min_confidence must be between 0 and 1"
+
+      invalid_noul_threshold = %{
+        "assertions_json" =>
+          ~s([{"type":"typed_judge","kind":"noul","question":"Judge this","threshold":1.1}])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, invalid_noul_threshold)
+      assert message =~ "noul threshold must be between 0 and 1"
+
+      too_few_choices = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "choice",
+              "question" => "Classify this",
+              "choices" => %{"safe" => nil},
+              "expected" => "safe"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, too_few_choices)
+      assert message =~ "choice kind requires 2 to 255 bounded choices"
+
+      duplicate_levels = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "Score this",
+              "levels" => ["none", "none"],
+              "expected" => "none"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, duplicate_levels)
+      assert message =~ "score kind requires 2 to 10 unique bounded levels"
+
+      missing_rule_level = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "Score this",
+              "levels" => ["none", "minor"],
+              "minimum" => "major"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, missing_rule_level)
+      assert message =~ "score rule value must match"
+
+      overlong_question = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "noul",
+              "question" => String.duplicate("x", 2_001)
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, overlong_question)
+      assert message =~ "question cannot exceed 2000 characters"
+
+      too_many_choices =
+        1..256
+        |> Map.new(fn index -> {"choice_#{index}", nil} end)
+        |> then(fn choices ->
+          %{
+            "assertions_json" =>
+              Jason.encode!([
+                %{
+                  "type" => "typed_judge",
+                  "kind" => "choice",
+                  "question" => "Classify this",
+                  "choices" => choices,
+                  "expected" => "choice_1"
+                }
+              ])
+          }
+        end)
+
+      assert {:error, message} = AssertionParser.parse(:json, too_many_choices)
+      assert message =~ "2 to 255 bounded choices"
+
+      too_many_levels = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "Score this",
+              "levels" => Enum.map(1..11, &"level_#{&1}"),
+              "minimum" => "level_1"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, too_many_levels)
+      assert message =~ "2 to 10 unique bounded levels"
+
+      oversized_choice = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "choice",
+              "question" => "Classify this",
+              "choices" => %{
+                "safe" => String.duplicate("x", 2_001),
+                String.duplicate("y", 201) => nil
+              },
+              "expected" => "safe"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, oversized_choice)
+      assert message =~ "bounded choices"
+
+      oversized_level = %{
+        "assertions_json" =>
+          Jason.encode!([
+            %{
+              "type" => "typed_judge",
+              "kind" => "score",
+              "question" => "Score this",
+              "levels" => ["none", String.duplicate("x", 201)],
+              "maximum" => "none"
+            }
+          ])
+      }
+
+      assert {:error, message} = AssertionParser.parse(:json, oversized_level)
+      assert message =~ "bounded levels"
+    end
+
     test "parses built-in rubric judges in visual mode" do
       provider_id = Ecto.UUID.generate()
 

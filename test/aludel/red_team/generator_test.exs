@@ -14,7 +14,9 @@ defmodule Aludel.RedTeam.GeneratorTest do
   test "generates bounded reviewable cases without persisting them" do
     provider = provider_fixture(%{provider: :ollama, model: "generator-model"})
 
-    expect(HttpClientMock, :request, fn "openai:generator-model", messages, opts ->
+    expect(HttpClientMock, :request, fn %{provider: :ollama, id: "generator-model"},
+                                        messages,
+                                        opts ->
       assert [system_message, user_message] = messages
       assert system_message.role == :system
       assert system_message.content =~ "untrusted generation context"
