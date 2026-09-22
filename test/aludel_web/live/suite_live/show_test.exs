@@ -1712,6 +1712,53 @@ defmodule Aludel.Web.SuiteLive.ShowTest do
                "#suite-result-assertions-table-#{suite_run.id}-#{test_case.id}"
              )
     end
+
+    test "renders typed judge expected and actual values", %{conn: conn} do
+      prompt = prompt_fixture_with_version()
+      suite = suite_fixture(%{prompt_id: prompt.id})
+      prompt = Aludel.Prompts.get_prompt_with_versions!(prompt.id)
+      version = hd(prompt.versions)
+      provider = provider_fixture(%{name: "Ollama"})
+      test_case = test_case_fixture(%{suite_id: suite.id})
+
+      suite_run =
+        suite_run_fixture(%{
+          suite_id: suite.id,
+          prompt_version_id: version.id,
+          provider_id: provider.id,
+          passed: 0,
+          failed: 1,
+          results: [
+            %{
+              "test_case_id" => test_case.id,
+              "passed" => false,
+              "output" => "Unsafe response",
+              "assertion_results" => [
+                %{
+                  "type" => "typed_judge",
+                  "passed" => false,
+                  "score" => 0.0,
+                  "reason" => "Typed choice did not match",
+                  "metadata" => %{
+                    "kind" => "choice",
+                    "expected" => "safe_refusal",
+                    "answer" => "unsafe_compliance"
+                  }
+                }
+              ],
+              "cost_usd" => 0.0,
+              "latency_ms" => 25
+            }
+          ]
+        })
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+      table_selector = "#suite-result-assertions-table-#{suite_run.id}-#{test_case.id}"
+
+      assert has_element?(view, table_selector, "typed_judge")
+      assert has_element?(view, table_selector, "safe_refusal")
+      assert has_element?(view, table_selector, "unsafe_compliance")
+    end
   end
 
   describe "retry test case result" do

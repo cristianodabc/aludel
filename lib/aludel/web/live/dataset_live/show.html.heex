@@ -1,6 +1,6 @@
 <Layouts.app flash={@flash} current_path={@current_path} access={@access}>
   <div class="page-container-wide">
-    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 24px;">
+    <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 24px;">
       <.link
         navigate={aludel_path("datasets")}
         class="button-secondary"
@@ -8,24 +8,31 @@
       >
         <.icon name="hero-arrow-left" class="size-4" />
       </.link>
-      <div>
+      <div style="min-width: 0;">
         <h1 id="dataset-title" style="margin: 0; font-size: 27px;">{@dataset.name}</h1>
         <p style="margin: 4px 0 0; color: var(--text-secondary); font-size: 13px;">
           Reusable evaluation conversations and expectations
         </p>
       </div>
-      <div style="display: flex; gap: 8px; margin-left: auto;">
+      <div
+        aria-label="Red-team case actions"
+        style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto;"
+      >
         <.link
+          id="add-red-team-cases-link"
           navigate={aludel_path("datasets/#{@dataset.id}/red-team/catalog")}
           class="button-secondary"
+          style="display: inline-flex; width: 180px; align-items: center; justify-content: center; gap: 8px; text-align: center; white-space: nowrap;"
         >
-          <.icon name="hero-shield-exclamation" class="size-4" /> Add red-team cases
+          <span>Add red-team cases</span>
         </.link>
         <.link
+          id="generate-red-team-cases-link"
           navigate={aludel_path("datasets/#{@dataset.id}/red-team/generated")}
           class="button-secondary"
+          style="display: inline-flex; width: 180px; align-items: center; justify-content: center; gap: 8px; text-align: center; white-space: nowrap;"
         >
-          <.icon name="hero-sparkles" class="size-4" /> Generate cases
+          <span>Generate cases</span>
         </.link>
       </div>
     </div>

@@ -779,6 +779,23 @@ defmodule Aludel.Web.SuiteLive.Show do
     ]
   end
 
+  defp assertion_result_rows_for_assertion(%{"type" => "typed_judge"} = assertion) do
+    metadata =
+      case assertion["metadata"] do
+        metadata when is_map(metadata) -> metadata
+        _other -> %{}
+      end
+
+    [
+      %{
+        detail: assertion["type"],
+        expected: typed_judge_expected(metadata),
+        actual: Map.get(metadata, "answer"),
+        passed: assertion["passed"]
+      }
+    ]
+  end
+
   defp assertion_result_rows_for_assertion(assertion) do
     [
       %{
@@ -788,6 +805,26 @@ defmodule Aludel.Web.SuiteLive.Show do
         passed: assertion["passed"]
       }
     ]
+  end
+
+  defp typed_judge_expected(%{"expected" => expected}) when not is_nil(expected) do
+    expected
+  end
+
+  defp typed_judge_expected(%{"threshold" => threshold}) when is_number(threshold) do
+    ">= #{threshold}"
+  end
+
+  defp typed_judge_expected(%{"rule" => %{"minimum" => minimum}}) do
+    ">= #{minimum}"
+  end
+
+  defp typed_judge_expected(%{"rule" => %{"maximum" => maximum}}) do
+    "<= #{maximum}"
+  end
+
+  defp typed_judge_expected(_metadata) do
+    nil
   end
 
   defp judge_source_label(%{"template" => template_id}) do

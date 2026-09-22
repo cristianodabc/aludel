@@ -1349,19 +1349,23 @@
                             <tbody>
                               <%= for row <- assertion_result_rows(result["assertion_results"]) do %>
                                 <tr style="border-bottom: 1px solid var(--border-muted);">
-                                  <td style="padding: 8px;">
+                                  <td style="padding: 8px; vertical-align: top;">
                                     <span style={"display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 4px; font-weight: 600; font-size: 12px; background: #{if row.passed, do: "rgba(16, 185, 129, 0.1)", else: "rgba(248, 81, 73, 0.1)"}; color: #{if row.passed, do: "#10b981", else: "#f85149"}"}>
                                       {if row.passed, do: "✓", else: "✗"}
                                     </span>
                                   </td>
-                                  <td style="padding: 8px; font-size: 13px; color: var(--text-secondary); font-weight: 500; font-family: monospace;">
+                                  <td style="padding: 8px; font-size: 12px; line-height: 20px; color: var(--text-secondary); font-weight: 500; font-family: monospace; vertical-align: top;">
                                     {row.detail}
                                   </td>
-                                  <td style="padding: 8px; font-size: 12px; font-family: monospace; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; vertical-align: top;">
-                                    {display_value(row.expected)}
+                                  <td style="padding: 8px; font-size: 12px; line-height: 20px; font-family: monospace; color: var(--text-primary); overflow-wrap: anywhere; word-break: break-word; vertical-align: top;">
+                                    <span style="white-space: pre-wrap;">{display_value(
+                                      row.expected
+                                    )}</span>
                                   </td>
-                                  <td style="padding: 8px; font-size: 12px; font-family: monospace; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; vertical-align: top;">
-                                    {display_value(row.actual)}
+                                  <td style="padding: 8px; font-size: 12px; line-height: 20px; font-family: monospace; color: var(--text-primary); overflow-wrap: anywhere; word-break: break-word; vertical-align: top;">
+                                    <span style="white-space: pre-wrap;">{display_value(
+                                      row.actual
+                                    )}</span>
                                   </td>
                                 </tr>
                               <% end %>
