@@ -18,10 +18,10 @@ defmodule Aludel.DemoDataTest do
     providers: 14,
     prompts: 8,
     prompt_versions: 24,
-    datasets: 6,
-    dataset_entries: 72,
-    suites: 8,
-    test_cases: 96,
+    datasets: 7,
+    dataset_entries: 84,
+    suites: 9,
+    test_cases: 108,
     runs: 150,
     run_results: 450,
     suite_runs: 150,
@@ -38,6 +38,7 @@ defmodule Aludel.DemoDataTest do
     assert_demo_counts()
     assert_history_invariants(now)
     assert_dashboard_and_evolution_data(now)
+    assert_typed_judge_demo_data()
 
     assert {:ok, @expected_summary} = DemoData.run(repo: Repo, env: :test, now: now)
 
@@ -58,10 +59,10 @@ defmodule Aludel.DemoDataTest do
     assert demo_count(Provider) == 14
     assert demo_count(Prompt) == 8
     assert associated_count(PromptVersion, Prompt, :prompt_id) == 24
-    assert demo_count(Dataset) == 6
-    assert associated_count(DatasetEntry, Dataset, :dataset_id) == 72
-    assert demo_count(Suite) == 8
-    assert associated_count(TestCase, Suite, :suite_id) == 96
+    assert demo_count(Dataset) == 7
+    assert associated_count(DatasetEntry, Dataset, :dataset_id) == 84
+    assert demo_count(Suite) == 9
+    assert associated_count(TestCase, Suite, :suite_id) == 108
     assert demo_count(Run) == 150
     assert associated_count(RunResult, Run, :run_id) == 450
     assert associated_count(SuiteRun, Suite, :suite_id) == 150
@@ -93,6 +94,54 @@ defmodule Aludel.DemoDataTest do
 
     assert Enum.all?(provider_types, &(&1 in run_provider_types))
     assert Enum.all?(provider_types, &(&1 in suite_provider_types))
+  end
+
+  defp assert_typed_judge_demo_data do
+    ollama_provider =
+      Repo.get_by!(Provider,
+        name: "Demo · Ollama Qwen 2.5 Coder Fast"
+      )
+
+    assert ollama_provider.provider == :ollama
+    assert ollama_provider.model == "qwen2.5-coder:fast"
+
+    typed_suite = Repo.get_by!(Suite, name: "Demo · Jev Safety Boundary Demo")
+
+    typed_test_case =
+      TestCase
+      |> where([test_case], test_case.suite_id == ^typed_suite.id)
+      |> limit(1)
+      |> Repo.one!()
+
+    assert typed_test_case
+    assert Enum.any?(typed_test_case.assertions, &(&1["type"] == "typed_judge"))
+
+    deterministic_suite = Repo.get_by!(Suite, name: "Demo · Safety Boundary Compliance")
+
+    refute TestCase
+           |> where([test_case], test_case.suite_id == ^deterministic_suite.id)
+           |> limit(1)
+           |> Repo.one!()
+           |> Map.fetch!(:assertions)
+           |> Enum.any?(&(&1["type"] == "typed_judge"))
+
+    typed_result =
+      SuiteRun
+      |> join(:inner, [suite_run], suite in Suite, on: suite.id == suite_run.suite_id)
+      |> where([_suite_run, suite], like(suite.name, "Demo · %"))
+      |> select([suite_run], suite_run.results)
+      |> Repo.all()
+      |> List.flatten()
+      |> Enum.flat_map(& &1["assertion_results"])
+      |> Enum.find(&(&1["type"] == "typed_judge"))
+
+    assert typed_result["metadata"]["demo"] == true
+    assert typed_result["metadata"]["schema_version"] == 1
+    assert typed_result["metadata"]["kind"] == "choice"
+    assert typed_result["metadata"]["expected"] == "safe_refusal"
+    assert typed_result["metadata"]["answer"] in ["safe_refusal", "unsafe_compliance"]
+    assert typed_result["metadata"]["confidence"] >= 0.75
+    assert typed_result["evaluator"]["provider"] == "demo-typed-judge"
   end
 
   defp assert_history_invariants(now) do

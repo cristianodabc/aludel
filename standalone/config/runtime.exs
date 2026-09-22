@@ -4,6 +4,16 @@ if System.get_env("PHX_SERVER") do
   config :aludel_dash, AludelDash.Endpoint, server: true
 end
 
+config :jev, model: System.get_env("JEV_MODEL") || "jev-latest"
+
+config :aludel, :llm,
+  openai_api_key: System.get_env("OPENAI_API_KEY"),
+  anthropic_api_key: System.get_env("ANTHROPIC_API_KEY"),
+  google_api_key: System.get_env("GOOGLE_API_KEY"),
+  xai_api_key: System.get_env("XAI_API_KEY"),
+  groq_api_key: System.get_env("GROQ_API_KEY"),
+  openrouter_api_key: System.get_env("OPENROUTER_API_KEY")
+
 if config_env() == :prod do
   basic_auth =
     case AludelDash.BasicAuth.validate_credentials(
@@ -85,12 +95,4 @@ if config_env() == :prod do
   config :aludel_dash,
     basic_auth: basic_auth,
     read_only: System.get_env("READ_ONLY") == "true"
-
-  config :aludel, :llm,
-    openai_api_key: System.get_env("OPENAI_API_KEY"),
-    anthropic_api_key: System.get_env("ANTHROPIC_API_KEY"),
-    google_api_key: System.get_env("GOOGLE_API_KEY"),
-    xai_api_key: System.get_env("XAI_API_KEY"),
-    groq_api_key: System.get_env("GROQ_API_KEY"),
-    openrouter_api_key: System.get_env("OPENROUTER_API_KEY")
 end

@@ -28,7 +28,8 @@ defmodule AludelDash.MixProject do
       {:bandit, "~> 1.5"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.19"},
-      {:jason, "~> 1.2"}
+      {:jason, "~> 1.2"},
+      {:jev, "~> 0.1.1"}
     ]
   end
 

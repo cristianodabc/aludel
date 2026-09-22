@@ -280,14 +280,12 @@ defmodule Aludel.LLMTest do
   end
 
   describe "call/3 with Ollama provider" do
-    test "marks Ollama as an unauthenticated OpenAI-compatible backend" do
+    test "uses ReqLLM's unauthenticated Ollama provider" do
       mock_response = build_mock_response("Test response", 5, 10)
 
       expect(HttpClientMock, :request, fn model, _prompt, opts ->
-        assert model == "openai:llama3.2"
-        provider_options = Keyword.fetch!(opts, :provider_options)
-
-        assert Keyword.fetch!(provider_options, :openai_compatible_backend) == :ollama
+        assert model == %{provider: :ollama, id: "llama3.2"}
+        assert Keyword.fetch!(opts, :provider_options) == []
         assert Keyword.fetch!(opts, :max_tokens) == 77
         refute Keyword.has_key?(opts, :api_key)
 

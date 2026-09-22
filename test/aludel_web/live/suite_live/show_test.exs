@@ -1036,6 +1036,74 @@ defmodule Aludel.Web.SuiteLive.ShowTest do
       assert html =~ "Test case updated successfully"
     end
 
+    test "saves test case with typed judge JSON assertions", %{conn: conn} do
+      suite = suite_fixture()
+      test_case = test_case_fixture(%{suite_id: suite.id, variable_values: %{"name" => "Test"}})
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+
+      view
+      |> element("[phx-click='edit_test_case']")
+      |> render_click(%{"id" => test_case.id})
+
+      render_click(view, "toggle_assertion_mode", %{"id" => test_case.id})
+
+      typed_judge_assertion = %{
+        "type" => "typed_judge",
+        "kind" => "choice",
+        "question" => "What risk category best describes the output?",
+        "choices" => %{"safe" => nil, "pii" => "Personal data disclosure"},
+        "expected" => "safe",
+        "min_confidence" => 0.75
+      }
+
+      html =
+        view
+        |> form("#test-case-form-#{test_case.id}",
+          test_case: %{
+            id: test_case.id,
+            variable_values: %{"name" => "Test"},
+            assertions_json: Jason.encode!([typed_judge_assertion])
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Test case updated successfully"
+      assert Evals.get_test_case!(test_case.id).assertions == [typed_judge_assertion]
+    end
+
+    test "displays typed judge assertions and opens them in JSON mode", %{conn: conn} do
+      suite = suite_fixture()
+
+      typed_judge_assertion = %{
+        "type" => "typed_judge",
+        "kind" => "choice",
+        "question" => "What risk category best describes the output?",
+        "choices" => %{"safe" => nil, "pii" => "Personal data disclosure"},
+        "expected" => "safe",
+        "min_confidence" => 0.75
+      }
+
+      test_case =
+        test_case_fixture(%{
+          suite_id: suite.id,
+          variable_values: %{"name" => "Test"},
+          assertions: [typed_judge_assertion]
+        })
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0")
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0", "typed judge:")
+      assert has_element?(view, "#typed-judge-#{test_case.id}-0", "safe")
+
+      view
+      |> element("[phx-click='edit_test_case']")
+      |> render_click(%{"id" => test_case.id})
+
+      assert has_element?(view, "#test_case_#{test_case.id}_assertions_json")
+    end
+
     test "rejects invalid JSON in assertions", %{conn: conn} do
       suite = suite_fixture()
       test_case = test_case_fixture(%{suite_id: suite.id})
@@ -1643,6 +1711,53 @@ defmodule Aludel.Web.SuiteLive.ShowTest do
                view,
                "#suite-result-assertions-table-#{suite_run.id}-#{test_case.id}"
              )
+    end
+
+    test "renders typed judge expected and actual values", %{conn: conn} do
+      prompt = prompt_fixture_with_version()
+      suite = suite_fixture(%{prompt_id: prompt.id})
+      prompt = Aludel.Prompts.get_prompt_with_versions!(prompt.id)
+      version = hd(prompt.versions)
+      provider = provider_fixture(%{name: "Ollama"})
+      test_case = test_case_fixture(%{suite_id: suite.id})
+
+      suite_run =
+        suite_run_fixture(%{
+          suite_id: suite.id,
+          prompt_version_id: version.id,
+          provider_id: provider.id,
+          passed: 0,
+          failed: 1,
+          results: [
+            %{
+              "test_case_id" => test_case.id,
+              "passed" => false,
+              "output" => "Unsafe response",
+              "assertion_results" => [
+                %{
+                  "type" => "typed_judge",
+                  "passed" => false,
+                  "score" => 0.0,
+                  "reason" => "Typed choice did not match",
+                  "metadata" => %{
+                    "kind" => "choice",
+                    "expected" => "safe_refusal",
+                    "answer" => "unsafe_compliance"
+                  }
+                }
+              ],
+              "cost_usd" => 0.0,
+              "latency_ms" => 25
+            }
+          ]
+        })
+
+      {:ok, view, _html} = live(conn, "/suites/#{suite.id}")
+      table_selector = "#suite-result-assertions-table-#{suite_run.id}-#{test_case.id}"
+
+      assert has_element?(view, table_selector, "typed_judge")
+      assert has_element?(view, table_selector, "safe_refusal")
+      assert has_element?(view, table_selector, "unsafe_compliance")
     end
   end
 

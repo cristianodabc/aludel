@@ -91,7 +91,7 @@ defmodule Aludel.Evals.TestCaseTest do
 
       refute changeset.valid?
 
-      assert {"Invalid assertion type at index 1: \"invalid_type\". Must be one of: contains, not_contains, regex, exact_match, json_field, json_deep_compare, rubric_judge",
+      assert {"Invalid assertion type at index 1: \"invalid_type\". Must be one of: contains, not_contains, regex, exact_match, json_field, json_deep_compare, rubric_judge, typed_judge",
               []} =
                changeset.errors[:assertions]
     end
