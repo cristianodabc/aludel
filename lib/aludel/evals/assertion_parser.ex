@@ -8,6 +8,9 @@ defmodule Aludel.Evals.AssertionParser do
   alias Aludel.Evals.RegexMatcher
 
   @type parse_mode :: :json | :visual
+  @max_typed_label_chars 200
+  @max_typed_description_chars 2_000
+  @max_typed_description_entries 30
 
   @doc """
   Parses and validates assertion form parameters in JSON or visual-editor form.
@@ -261,6 +264,9 @@ defmodule Aludel.Evals.AssertionParser do
       type == "rubric_judge" ->
         validate_rubric_judge_assertion(assertion, idx)
 
+      type == "typed_judge" ->
+        validate_typed_judge_assertion(assertion, idx)
+
       type == "regex" ->
         validate_regex_assertion(assertion, idx)
 
@@ -398,6 +404,173 @@ defmodule Aludel.Evals.AssertionParser do
   defp invalid_rubric_source(idx) do
     {:error,
      "Assertion at index #{idx}: rubric_judge type requires either 'rubric' or a known 'template'"}
+  end
+
+  defp validate_typed_judge_assertion(assertion, idx) do
+    with :ok <- validate_typed_judge_question(assertion, idx) do
+      case Map.get(assertion, "kind") do
+        "noul" ->
+          validate_typed_judge_noul(assertion, idx)
+
+        "choice" ->
+          validate_typed_judge_choice(assertion, idx)
+
+        "score" ->
+          validate_typed_judge_score(assertion, idx)
+
+        _other ->
+          {:error,
+           "Assertion at index #{idx}: typed_judge type requires kind to be one of noul, choice, score"}
+      end
+    end
+  end
+
+  defp validate_typed_judge_question(assertion, idx) do
+    case Map.get(assertion, "question") do
+      question when is_binary(question) ->
+        cond do
+          String.trim(question) == "" ->
+            {:error, "Assertion at index #{idx}: typed_judge type requires a non-blank question"}
+
+          String.length(question) > 2_000 ->
+            {:error,
+             "Assertion at index #{idx}: typed_judge question cannot exceed 2000 characters"}
+
+          true ->
+            :ok
+        end
+
+      _other ->
+        {:error, "Assertion at index #{idx}: typed_judge type requires a non-blank question"}
+    end
+  end
+
+  defp validate_typed_judge_noul(assertion, idx) do
+    if valid_probability?(Map.get(assertion, "threshold", 0.5)) do
+      :ok
+    else
+      {:error, "Assertion at index #{idx}: typed_judge noul threshold must be between 0 and 1"}
+    end
+  end
+
+  defp validate_typed_judge_choice(assertion, idx) do
+    choices = Map.get(assertion, "choices")
+    expected = Map.get(assertion, "expected")
+
+    cond do
+      not valid_typed_judge_choices?(choices) ->
+        {:error,
+         "Assertion at index #{idx}: typed_judge choice kind requires 2 to 255 bounded choices"}
+
+      not (is_binary(expected) and Map.has_key?(choices, expected)) ->
+        {:error,
+         "Assertion at index #{idx}: typed_judge choice kind requires expected to match a choice key"}
+
+      not valid_probability?(Map.get(assertion, "min_confidence", 0.0)) ->
+        {:error, "Assertion at index #{idx}: typed_judge min_confidence must be between 0 and 1"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_typed_judge_score(assertion, idx) do
+    levels = Map.get(assertion, "levels")
+
+    cond do
+      not valid_typed_judge_levels?(levels) ->
+        {:error,
+         "Assertion at index #{idx}: typed_judge score kind requires 2 to 10 unique bounded levels"}
+
+      not valid_probability?(Map.get(assertion, "min_confidence", 0.0)) ->
+        {:error, "Assertion at index #{idx}: typed_judge min_confidence must be between 0 and 1"}
+
+      score_rule_count(assertion) != 1 ->
+        {:error,
+         "Assertion at index #{idx}: typed_judge score kind requires exactly one of expected, minimum, or maximum"}
+
+      not valid_typed_judge_score_rule?(assertion, levels) ->
+        {:error,
+         "Assertion at index #{idx}: typed_judge score rule value must match one of the configured levels"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_typed_judge_choices?(choices)
+       when is_map(choices) and map_size(choices) in 2..255 do
+    Enum.all?(choices, fn {key, value} ->
+      valid_typed_judge_label?(key) and valid_typed_judge_description?(value)
+    end)
+  end
+
+  defp valid_typed_judge_choices?(_choices) do
+    false
+  end
+
+  defp valid_typed_judge_levels?(levels) when is_list(levels) do
+    Enum.all?(levels, &valid_typed_judge_label?/1) and
+      Enum.uniq(levels) == levels and length(levels) in 2..10
+  end
+
+  defp valid_typed_judge_levels?(_levels) do
+    false
+  end
+
+  defp valid_typed_judge_label?(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    trimmed != "" and String.length(trimmed) <= @max_typed_label_chars
+  end
+
+  defp valid_typed_judge_label?(_value) do
+    false
+  end
+
+  defp valid_typed_judge_description?(nil) do
+    true
+  end
+
+  defp valid_typed_judge_description?(value) when is_binary(value) do
+    String.length(value) <= @max_typed_description_chars
+  end
+
+  defp valid_typed_judge_description?(value)
+       when is_map(value) and map_size(value) <= @max_typed_description_entries do
+    Enum.all?(value, fn {key, nested_value} ->
+      is_binary(key) and String.length(key) <= @max_typed_label_chars and
+        valid_typed_judge_description_value?(nested_value)
+    end)
+  end
+
+  defp valid_typed_judge_description?(_value) do
+    false
+  end
+
+  defp valid_typed_judge_description_value?(value)
+       when is_nil(value) or is_boolean(value) or is_number(value) do
+    true
+  end
+
+  defp valid_typed_judge_description_value?(value) when is_binary(value) do
+    String.length(value) <= @max_typed_description_chars
+  end
+
+  defp valid_typed_judge_description_value?(_value) do
+    false
+  end
+
+  defp score_rule_count(assertion) do
+    ["expected", "minimum", "maximum"]
+    |> Enum.count(&Map.has_key?(assertion, &1))
+  end
+
+  defp valid_typed_judge_score_rule?(assertion, levels) do
+    ["expected", "minimum", "maximum"]
+    |> Enum.find_value(false, fn field ->
+      value = Map.get(assertion, field)
+      is_binary(value) and value in levels
+    end)
   end
 
   defp parse_expected_json(value, idx) when is_binary(value) do
@@ -568,6 +741,10 @@ defmodule Aludel.Evals.AssertionParser do
   defp valid_threshold?(value) when is_integer(value), do: value >= 0 and value <= 100
   defp valid_threshold?(value) when is_float(value), do: value >= 0.0 and value <= 100.0
   defp valid_threshold?(_value), do: false
+
+  defp valid_probability?(value) when is_integer(value), do: value >= 0 and value <= 1
+  defp valid_probability?(value) when is_float(value), do: value >= 0.0 and value <= 1.0
+  defp valid_probability?(_value), do: false
 
   defp valid_provider_id?(provider_id) when is_binary(provider_id) do
     match?({:ok, _uuid}, Ecto.UUID.cast(provider_id))

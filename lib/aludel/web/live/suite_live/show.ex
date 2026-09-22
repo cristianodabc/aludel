@@ -350,6 +350,7 @@ defmodule Aludel.Web.SuiteLive.Show do
       |> assign(:editing_assertions, test_case.assertions)
       |> assign(:editing_test_case_params, form_params)
       |> assign(:test_case_form, to_form(TestCaseEditor.change_form(form_params), as: :test_case))
+      |> maybe_force_json_assertion_mode(id, test_case.assertions)
       |> allow_upload(:documents,
         accept: ~w(.pdf .png .jpg .jpeg .csv .json .txt),
         max_entries: 5,
@@ -778,6 +779,23 @@ defmodule Aludel.Web.SuiteLive.Show do
     ]
   end
 
+  defp assertion_result_rows_for_assertion(%{"type" => "typed_judge"} = assertion) do
+    metadata =
+      case assertion["metadata"] do
+        metadata when is_map(metadata) -> metadata
+        _other -> %{}
+      end
+
+    [
+      %{
+        detail: assertion["type"],
+        expected: typed_judge_expected(metadata),
+        actual: Map.get(metadata, "answer"),
+        passed: assertion["passed"]
+      }
+    ]
+  end
+
   defp assertion_result_rows_for_assertion(assertion) do
     [
       %{
@@ -787,6 +805,26 @@ defmodule Aludel.Web.SuiteLive.Show do
         passed: assertion["passed"]
       }
     ]
+  end
+
+  defp typed_judge_expected(%{"expected" => expected}) when not is_nil(expected) do
+    expected
+  end
+
+  defp typed_judge_expected(%{"threshold" => threshold}) when is_number(threshold) do
+    ">= #{threshold}"
+  end
+
+  defp typed_judge_expected(%{"rule" => %{"minimum" => minimum}}) do
+    ">= #{minimum}"
+  end
+
+  defp typed_judge_expected(%{"rule" => %{"maximum" => maximum}}) do
+    "<= #{maximum}"
+  end
+
+  defp typed_judge_expected(_metadata) do
+    nil
   end
 
   defp judge_source_label(%{"template" => template_id}) do
@@ -1045,6 +1083,14 @@ defmodule Aludel.Web.SuiteLive.Show do
 
   defp display_value(value) when is_map(value) or is_list(value), do: Jason.encode!(value)
   defp display_value(value), do: to_string(value)
+
+  defp maybe_force_json_assertion_mode(socket, id, assertions) do
+    if Enum.any?(assertions, &(&1["type"] == "typed_judge")) do
+      assign(socket, :assertion_edit_mode, Map.put(socket.assigns.assertion_edit_mode, id, :json))
+    else
+      socket
+    end
+  end
 
   defp sync_editing_assertions(socket, assertions) do
     form_params =

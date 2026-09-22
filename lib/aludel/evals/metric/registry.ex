@@ -15,6 +15,7 @@ defmodule Aludel.Evals.Metric.Registry do
   alias Aludel.Evals.Metrics.NotContains
   alias Aludel.Evals.Metrics.Regex
   alias Aludel.Evals.Metrics.RubricJudge
+  alias Aludel.Evals.Metrics.TypedJudge
 
   @metrics [
     {"contains", Contains},
@@ -23,7 +24,8 @@ defmodule Aludel.Evals.Metric.Registry do
     {"exact_match", ExactMatch},
     {"json_field", JSONField},
     {"json_deep_compare", JSONDeepCompare},
-    {"rubric_judge", RubricJudge}
+    {"rubric_judge", RubricJudge},
+    {"typed_judge", TypedJudge}
   ]
 
   @doc """

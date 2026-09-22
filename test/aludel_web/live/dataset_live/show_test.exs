@@ -14,13 +14,13 @@ defmodule Aludel.Web.DatasetLive.ShowTest do
 
     assert has_element?(
              view,
-             "a[href='/datasets/#{dataset.id}/red-team/catalog']",
+             "#add-red-team-cases-link[href='/datasets/#{dataset.id}/red-team/catalog']",
              "Add red-team cases"
            )
 
     assert has_element?(
              view,
-             "a[href='/datasets/#{dataset.id}/red-team/generated']",
+             "#generate-red-team-cases-link[href='/datasets/#{dataset.id}/red-team/generated']",
              "Generate cases"
            )
 
