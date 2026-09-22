@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.0] - 2026-09-21
+
+### Added
+- Add Jev-backed typed judge assertions for calibrated yes/no probabilities, closed-label choices, and ordered scores
+- Add standalone typed-judge configuration and a local Ollama smoke task for demonstrating typed evaluations
+- Add typed-judge authoring, result evidence, validation, and seeded safety, extraction, and routing examples across the dashboard, ExUnit, and file-based suite workflows
+
+### Changed
+- Update Phoenix, LiveView, ReqLLM, erlexec, and required transitive dependencies across the library and standalone application
+
+### Security
+- Update Mint to 1.10.1 to address CVE-2026-82672
+
 ## [0.7.0] - 2026-09-05
 
 ### Added
