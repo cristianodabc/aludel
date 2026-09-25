@@ -214,10 +214,15 @@ defmodule Aludel.Web.SuiteLive.Show do
   @impl Phoenix.LiveView
   def handle_event("toggle_assertion_mode", %{"id" => id}, socket) do
     current_mode = Map.get(socket.assigns.assertion_edit_mode, id, :visual)
-    socket = maybe_sync_editing_assertions_json(socket, id, current_mode)
-    new_mode = if current_mode == :visual, do: :json, else: :visual
-    new_modes = Map.put(socket.assigns.assertion_edit_mode, id, new_mode)
-    {:noreply, assign(socket, :assertion_edit_mode, new_modes)}
+
+    if current_mode == :json and typed_judge_assertions?(socket.assigns.editing_test_case_params) do
+      {:noreply, socket}
+    else
+      socket = maybe_sync_editing_assertions_json(socket, id, current_mode)
+      new_mode = if current_mode == :visual, do: :json, else: :visual
+      new_modes = Map.put(socket.assigns.assertion_edit_mode, id, new_mode)
+      {:noreply, assign(socket, :assertion_edit_mode, new_modes)}
+    end
   end
 
   @impl Phoenix.LiveView
@@ -1090,6 +1095,21 @@ defmodule Aludel.Web.SuiteLive.Show do
     else
       socket
     end
+  end
+
+  defp typed_judge_assertions?(%{"assertions_json" => assertions_json})
+       when is_binary(assertions_json) do
+    case Jason.decode(assertions_json) do
+      {:ok, assertions} when is_list(assertions) ->
+        Enum.any?(assertions, &match?(%{"type" => "typed_judge"}, &1))
+
+      _other ->
+        false
+    end
+  end
+
+  defp typed_judge_assertions?(_params) do
+    false
   end
 
   defp sync_editing_assertions(socket, assertions) do

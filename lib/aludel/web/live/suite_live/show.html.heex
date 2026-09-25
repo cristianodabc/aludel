@@ -501,16 +501,19 @@
                           Assertions
                         </h4>
                         <div style="display: flex; gap: 6px;">
-                          <button
-                            type="button"
-                            phx-click="toggle_assertion_mode"
-                            phx-value-id={test_case.id}
-                            style="font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg-secondary); cursor: pointer; font-weight: 500;"
-                          >
-                            {if Map.get(@assertion_edit_mode, test_case.id, :visual) == :visual,
-                              do: "JSON",
-                              else: "Visual"}
-                          </button>
+                          <%= if not typed_judge_assertions?(@editing_test_case_params) do %>
+                            <button
+                              id={"assertion-mode-toggle-#{test_case.id}"}
+                              type="button"
+                              phx-click="toggle_assertion_mode"
+                              phx-value-id={test_case.id}
+                              style="font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg-secondary); cursor: pointer; font-weight: 500;"
+                            >
+                              {if Map.get(@assertion_edit_mode, test_case.id, :visual) == :visual,
+                                do: "JSON",
+                                else: "Visual"}
+                            </button>
+                          <% end %>
                           <%= if Map.get(@assertion_edit_mode, test_case.id, :visual) == :visual do %>
                             <button
                               type="button"
