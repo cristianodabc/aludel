@@ -1102,6 +1102,12 @@ defmodule Aludel.Web.SuiteLive.ShowTest do
       |> render_click(%{"id" => test_case.id})
 
       assert has_element?(view, "#test_case_#{test_case.id}_assertions_json")
+      refute has_element?(view, "#assertion-mode-toggle-#{test_case.id}")
+
+      render_click(view, "toggle_assertion_mode", %{"id" => test_case.id})
+
+      assert has_element?(view, "#test_case_#{test_case.id}_assertions_json")
+      refute has_element?(view, "#assertion-mode-toggle-#{test_case.id}")
     end
 
     test "rejects invalid JSON in assertions", %{conn: conn} do
