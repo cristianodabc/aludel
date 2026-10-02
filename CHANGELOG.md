@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+- Require patched LazyHTML 0.1.13 and Mint 1.10.2 releases
+
+### Fixed
+- Classify malformed Jev 0.2.1 responses as judge errors in the standalone application
+
+### Changed
+- Update root llm_db, Dialyxir, Mox, and ex_slop dependencies, and standalone llm_db and Jev dependencies
+
 ## [0.8.1] - 2026-09-24
 
 ### Fixed
