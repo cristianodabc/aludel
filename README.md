@@ -264,7 +264,7 @@ Aludel depends on PostgreSQL-specific features, including `JSONB`, `percentile_d
 ```elixir
 def deps do
   [
-    {:aludel, "~> 0.8.1"}
+    {:aludel, "~> 0.8.2"}
   ]
 end
 ```
