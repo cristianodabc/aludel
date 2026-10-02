@@ -352,6 +352,10 @@ defmodule AludelDash.TypedJudgeAdapter do
     :service_error
   end
 
+  defp request_error(%JSONCodec.Error{}) do
+    :invalid_response
+  end
+
   defp request_error(%Req.TransportError{reason: reason}) when reason in [:timeout, :closed] do
     :timeout
   end
