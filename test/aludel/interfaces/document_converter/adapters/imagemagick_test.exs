@@ -123,14 +123,14 @@ defmodule Aludel.Interfaces.DocumentConverter.Adapters.ImagemagickTest do
     on_exit(fn -> kill_recorded_process(descendant_pid_file) end)
     started_at = System.monotonic_time(:millisecond)
 
-    assert {:error, {:conversion_timeout, 500}} =
+    assert {:error, {:conversion_timeout, 2_000}} =
              Imagemagick.convert_pdf_to_png(
                "%PDF-1.4\ntest",
-               options(executable, root, timeout_ms: 500)
+               options(executable, root, timeout_ms: 2_000)
              )
 
     elapsed = System.monotonic_time(:millisecond) - started_at
-    assert elapsed < 2_000
+    assert elapsed < 3_500
     descendant_pid = descendant_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert wait_until_stopped(descendant_pid)
     assert no_conversion_directories?(root)

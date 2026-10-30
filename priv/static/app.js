@@ -289,7 +289,7 @@
         payload: this.payload(),
         ref: this.ref,
         join_ref: this.channel.joinRef()
-      });
+      }, this.channel);
     }
     /**
      *
@@ -721,12 +721,21 @@
         body
       };
       let controller = null;
+      let timeoutId = null;
       if (timeout) {
         controller = new AbortController();
-        const _timeoutId = setTimeout(() => controller.abort(), timeout);
+        timeoutId = setTimeout(() => controller.abort(), timeout);
         options.signal = controller.signal;
       }
-      global.fetch(endPoint, options).then((response) => response.text()).then((data) => this.parseJSON(data)).then((data) => callback2 && callback2(data)).catch((err) => {
+      global.fetch(endPoint, options).then((response) => response.text()).then((data) => this.parseJSON(data)).then((data) => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        callback2 && callback2(data);
+      }).catch((err) => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
         if (err.name === "AbortError" && ontimeout) {
           ontimeout();
         } else {
@@ -822,6 +831,7 @@
       this.token = null;
       this.skipHeartbeat = true;
       this.reqs = /* @__PURE__ */ new Set();
+      this.messageTimers = /* @__PURE__ */ new Set();
       this.awaitingBatchAck = false;
       this.currentBatch = null;
       this.currentBatchTimer = null;
@@ -844,18 +854,26 @@
     endpointURL() {
       return Ajax.appendParams(this.pollEndpoint, { token: this.token });
     }
-    closeAndRetry(code, reason, wasClean) {
-      this.close(code, reason, wasClean);
-      this.readyState = SOCKET_STATES.connecting;
+    closeAndRetry(error, code, reason, wasClean) {
+      if (!this.isActive()) {
+        return;
+      }
+      this.stop(SOCKET_STATES.connecting);
+      this.onerror(error);
+      if (this.isActive()) {
+        this.emitClose(code, reason, wasClean);
+      }
     }
     ontimeout() {
-      this.onerror("timeout");
-      this.closeAndRetry(1005, "timeout", false);
+      this.closeAndRetry("timeout", 1005, "timeout", false);
     }
     isActive() {
       return this.readyState === SOCKET_STATES.open || this.readyState === SOCKET_STATES.connecting;
     }
     poll() {
+      if (!this.isActive()) {
+        return;
+      }
       const headers = { "Accept": "application/json" };
       if (this.authToken) {
         headers["X-Phoenix-AuthToken"] = this.authToken;
@@ -864,8 +882,7 @@
         if (resp) {
           var { status, token, messages } = resp;
           if (status === 410 && this.token !== null) {
-            this.onerror(410);
-            this.closeAndRetry(3410, "session_gone", false);
+            this.closeAndRetry(410, 3410, "session_gone", false);
             return;
           }
           this.token = token;
@@ -875,7 +892,11 @@
         switch (status) {
           case 200:
             messages.forEach((msg) => {
-              setTimeout(() => this.onmessage({ data: msg }), 0);
+              const timer = setTimeout(() => {
+                this.messageTimers.delete(timer);
+                this.onmessage({ data: msg });
+              }, 0);
+              this.messageTimers.add(timer);
             });
             this.poll();
             break;
@@ -893,8 +914,7 @@
             break;
           case 0:
           case 500:
-            this.onerror(500);
-            this.closeAndRetry(1011, "internal server error", 500);
+            this.closeAndRetry(500, 1011, "internal server error", false);
             break;
           default:
             throw new Error(`unhandled poll status ${status}`);
@@ -926,9 +946,7 @@
       const batch = messages.slice(offset, next);
       this.ajax("POST", { "Content-Type": "application/x-ndjson" }, batch.join("\n"), () => this.ontimeout(), (resp) => {
         if (!resp || resp.status !== 200) {
-          this.awaitingBatchAck = false;
-          this.onerror(resp && resp.status);
-          this.closeAndRetry(1011, "internal server error", false);
+          this.closeAndRetry(resp && resp.status, 1011, "internal server error", false);
         } else if (next < messages.length) {
           this.batchSend(messages, next);
         } else if (this.batchBuffer.length > 0) {
@@ -940,15 +958,35 @@
       });
     }
     close(code, reason, wasClean) {
-      for (let req of this.reqs) {
-        req.abort();
+      this.stop(SOCKET_STATES.closed);
+      this.emitClose(code, reason, wasClean);
+    }
+    /**
+     * Cancels the pending requests, queued messages and outgoing batches.
+     */
+    stop(readyState) {
+      this.readyState = readyState;
+      const reqs = this.reqs;
+      this.reqs = /* @__PURE__ */ new Set();
+      for (let { req } of reqs) {
+        req && req.abort();
       }
-      this.readyState = SOCKET_STATES.closed;
-      let opts = Object.assign({ code: 1e3, reason: void 0, wasClean: true }, { code, reason, wasClean });
+      for (let timer of this.messageTimers) {
+        clearTimeout(timer);
+      }
+      this.messageTimers.clear();
       this.batchBuffer = [];
       this.awaitingBatchAck = false;
       clearTimeout(this.currentBatchTimer);
       this.currentBatchTimer = null;
+      this.currentBatch = null;
+    }
+    /**
+     * Emits the close event. Like a WebSocket closed without a code, it reports 1005 (no status)
+     * unless one is given, as 1000 would look like the server closing the connection normally.
+     */
+    emitClose(code = 1005, reason, wasClean = true) {
+      let opts = { code, reason, wasClean };
       if (typeof CloseEvent !== "undefined") {
         this.onclose(new CloseEvent("close", opts));
       } else {
@@ -956,18 +994,18 @@
       }
     }
     ajax(method, headers, body, onCallerTimeout, callback2) {
-      let req;
+      const request = { req: null };
+      this.reqs.add(request);
       let ontimeout = () => {
-        this.reqs.delete(req);
-        onCallerTimeout();
+        if (this.reqs.delete(request)) {
+          onCallerTimeout();
+        }
       };
-      req = Ajax.request(method, this.endpointURL(), headers, body, this.timeout, ontimeout, (resp) => {
-        this.reqs.delete(req);
-        if (this.isActive()) {
+      request.req = Ajax.request(method, this.endpointURL(), headers, body, this.timeout, ontimeout, (resp) => {
+        if (this.reqs.delete(request)) {
           callback2(resp);
         }
       });
-      this.reqs.add(req);
     }
   };
   var serializer_default = {
@@ -1087,6 +1125,75 @@
       return { join_ref: null, ref: null, topic, event, payload: data };
     }
   };
+  var Connection = class {
+    /**
+     * @param {Socket} socket
+     * @param {Object} transport - The transport instance, for example a WebSocket
+     */
+    constructor(socket, transport) {
+      this.socket = socket;
+      this.transport = transport;
+      this.joins = /* @__PURE__ */ new WeakMap();
+      this.pings = /* @__PURE__ */ new Map();
+      this.closing = false;
+      this.ended = false;
+      this.channelsErrored = false;
+      this.closeHandled = false;
+      transport.onopen = () => {
+        if (this.isCurrent()) {
+          socket.onConnOpen();
+        }
+      };
+      transport.onerror = (error) => {
+        if (this.isCurrent()) {
+          socket.onConnError(error);
+        }
+      };
+      transport.onmessage = (event) => {
+        if (this.isCurrent()) {
+          socket.onConnMessage(event);
+        }
+      };
+      transport.onclose = (event) => {
+        if (this.isCurrent() && !this.closeHandled) {
+          this.closeHandled = true;
+          socket.onConnClose(event);
+        }
+      };
+    }
+    /**
+     * Whether this is the connection the socket currently uses. A replaced connection
+     * can still emit events while it closes, but they no longer concern the socket.
+     */
+    isCurrent() {
+      return this.socket.connection === this;
+    }
+    isOpen() {
+      return this.transport.readyState === SOCKET_STATES.open;
+    }
+    isConnecting() {
+      return this.transport.readyState === SOCKET_STATES.connecting;
+    }
+    /**
+     * Whether the channel's current join was sent over this connection.
+     */
+    carried(channel, joinRef = channel.joinRef()) {
+      return this.joins.has(channel) && this.joins.get(channel) === joinRef;
+    }
+    /**
+     * Closes the transport. Its close event then only confirms our close.
+     */
+    close(code, reason) {
+      this.closing = true;
+      this.transport.onerror = function() {
+      };
+      if (code) {
+        this.transport.close(code, reason || "");
+      } else {
+        this.transport.close();
+      }
+    }
+  };
   var Socket = class {
     constructor(endPoint, opts = {}) {
       this.stateChangeCallbacks = { open: [], close: [], error: [], message: [] };
@@ -1094,6 +1201,7 @@
       this.sendBuffer = [];
       this.ref = 0;
       this.fallbackRef = null;
+      this.fallbackErrorRef = null;
       this.timeout = opts.timeout || DEFAULT_TIMEOUT;
       this.transport = opts.transport || global.WebSocket || LongPoll;
       this.primaryPassedHealthCheck = false;
@@ -1104,10 +1212,10 @@
       this.defaultEncoder = serializer_default.encode.bind(serializer_default);
       this.defaultDecoder = serializer_default.decode.bind(serializer_default);
       this.closeWasClean = true;
-      this.disconnecting = false;
       this.binaryType = opts.binaryType || "arraybuffer";
+      this.connection = null;
       this.connectClock = 1;
-      this.pageHidden = false;
+      this.visibilityConnection = null;
       if (this.transport !== LongPoll) {
         this.encode = opts.encode || this.defaultEncoder;
         this.decode = opts.decode || this.defaultDecoder;
@@ -1118,7 +1226,7 @@
       let awaitingConnectionOnPageShow = null;
       if (phxWindow && phxWindow.addEventListener) {
         phxWindow.addEventListener("pagehide", (_e) => {
-          if (this.conn) {
+          if (this.connection && !this.connection.ended) {
             this.disconnect();
             awaitingConnectionOnPageShow = this.connectClock;
           }
@@ -1130,14 +1238,10 @@
           }
         });
         phxWindow.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "hidden") {
-            this.pageHidden = true;
-          } else {
-            this.pageHidden = false;
-            if (!this.isConnected() && !this.closeWasClean) {
-              this.teardown(() => this.connect());
-            }
-          }
+          this.handleVisibilityChange();
+        });
+        phxWindow.document && phxWindow.document.addEventListener("resume", () => {
+          this.handleVisibilityChange();
         });
       }
       this.heartbeatIntervalMs = opts.heartbeatIntervalMs || 3e4;
@@ -1174,9 +1278,41 @@
           this.teardown();
           return;
         }
-        this.teardown(() => this.connect());
+        this.teardownAndReconnect(() => this.connect());
       }, this.reconnectAfterMs);
       this.authToken = opts.authToken && closure(opts.authToken);
+    }
+    /**
+     * The transport instance of the current connection, for example a WebSocket
+     */
+    get conn() {
+      return this.connection && this.connection.transport;
+    }
+    /**
+     * @internal
+     */
+    get pageHidden() {
+      return phxWindow && phxWindow.document ? phxWindow.document.visibilityState === "hidden" : false;
+    }
+    /**
+     * @internal
+     */
+    handleVisibilityChange() {
+      if (this.pageHidden) {
+        this.visibilityConnection = null;
+        return;
+      }
+      const connection = this.connection;
+      if (connection && connection === this.visibilityConnection && connection.isConnecting()) {
+        return;
+      }
+      if (!this.isConnected() && !this.closeWasClean) {
+        this.reconnectTimer.reset();
+        this.teardownAndReconnect(() => {
+          this.connect();
+          this.visibilityConnection = this.connection;
+        });
+      }
     }
     /**
      * Returns the LongPoll transport reference
@@ -1191,15 +1327,23 @@
      *
      */
     replaceTransport(newTransport) {
-      this.connectClock++;
+      const connectClock = ++this.connectClock;
       this.closeWasClean = true;
       clearTimeout(this.fallbackTimer);
       this.reconnectTimer.reset();
-      if (this.conn) {
-        this.conn.close();
-        this.conn = null;
-      }
       this.transport = newTransport;
+      const connection = this.connection;
+      if (connection) {
+        const wasOpen = connection.isOpen();
+        this.connection = null;
+        connection.ended = true;
+        connection.close();
+        this.clearHeartbeats();
+        if (wasOpen) {
+          this.triggerChanError("connection_closed", connection);
+        }
+      }
+      return connectClock;
     }
     /**
      * Returns the socket protocol
@@ -1238,14 +1382,13 @@
      */
     disconnect(callback2, code, reason) {
       this.connectClock++;
-      this.disconnecting = true;
       this.closeWasClean = true;
       clearTimeout(this.fallbackTimer);
       this.reconnectTimer.reset();
-      this.teardown(() => {
-        this.disconnecting = false;
-        callback2 && callback2();
-      }, code, reason);
+      if (this.connection) {
+        this.connection.ended = true;
+      }
+      this.teardown(callback2, code, reason);
     }
     /**
      *
@@ -1259,7 +1402,7 @@
         console && console.log("passing params to connect is deprecated. Instead pass :params to the Socket constructor");
         this.params = closure(params);
       }
-      if (this.conn && !this.disconnecting) {
+      if (this.connection && !this.connection.ended) {
         return;
       }
       if (this.longPollFallbackMs && this.transport !== LongPoll) {
@@ -1337,13 +1480,8 @@
       }
       let ref = this.makeRef();
       let startTime = Date.now();
+      this.connection.pings.set(ref, () => callback2(Date.now() - startTime));
       this.push({ topic: "phoenix", event: "heartbeat", payload: {}, ref });
-      let onMsgRef = this.onMessage((msg) => {
-        if (msg.ref === ref) {
-          this.off([onMsgRef]);
-          callback2(Date.now() - startTime);
-        }
-      });
       return true;
     }
     /**
@@ -1363,19 +1501,21 @@
      * @private
      */
     transportConnect() {
+      const previous = this.connection;
       this.connectClock++;
       this.closeWasClean = false;
+      clearTimeout(this.reconnectTimer.timer);
       let protocols = void 0;
       if (this.authToken) {
         protocols = ["phoenix", `${AUTH_TOKEN_PREFIX}${btoa(this.authToken()).replace(/=/g, "")}`];
       }
-      this.conn = new this.transport(this.endPointURL(), protocols);
-      this.conn.binaryType = this.binaryType;
-      this.conn.timeout = this.longpollerTimeout;
-      this.conn.onopen = () => this.onConnOpen();
-      this.conn.onerror = (error) => this.onConnError(error);
-      this.conn.onmessage = (event) => this.onConnMessage(event);
-      this.conn.onclose = (event) => this.onConnClose(event);
+      const transport = new this.transport(this.endPointURL(), protocols);
+      transport.binaryType = this.binaryType;
+      transport.timeout = this.longpollerTimeout;
+      this.connection = new Connection(this, transport);
+      if (previous && previous.isOpen()) {
+        this.triggerChanError("connection_closed", previous);
+      }
     }
     getSession(key) {
       return this.sessionStore && this.sessionStore.getItem(key);
@@ -1384,41 +1524,52 @@
       this.sessionStore && this.sessionStore.setItem(key, val);
     }
     connectWithFallback(fallbackTransport, fallbackThreshold = 2500) {
-      clearTimeout(this.fallbackTimer);
+      this.cancelFallback();
       let established = false;
       let primaryTransport = true;
-      let openRef, errorRef;
+      let errorRef;
+      let connectClock;
+      const isCurrent = () => connectClock === this.connectClock && !this.closeWasClean;
       let fallbackTransportName = this.transportName(fallbackTransport);
       let fallback = (reason) => {
         this.log("transport", `falling back to ${fallbackTransportName}...`, reason);
-        this.off([openRef, errorRef]);
+        this.off([errorRef]);
         primaryTransport = false;
-        this.replaceTransport(fallbackTransport);
+        const replaceClock = this.replaceTransport(fallbackTransport);
+        if (replaceClock !== this.connectClock) {
+          return;
+        }
         this.transportConnect();
       };
       if (this.getSession(`phx:fallback:${fallbackTransportName}`)) {
         return fallback("memorized");
       }
       this.fallbackTimer = setTimeout(fallback, fallbackThreshold);
-      errorRef = this.onError((reason) => {
+      errorRef = this.fallbackErrorRef = this.onError((reason) => {
+        if (!isCurrent()) {
+          return;
+        }
         this.log("transport", "error", reason);
         if (primaryTransport && !established) {
           clearTimeout(this.fallbackTimer);
           fallback(reason);
         }
       });
-      if (this.fallbackRef) {
-        this.off([this.fallbackRef]);
-      }
       this.fallbackRef = this.onOpen(() => {
-        established = true;
         if (!primaryTransport) {
+          if (this.transport !== fallbackTransport || this.closeWasClean) {
+            return;
+          }
           let fallbackTransportName2 = this.transportName(fallbackTransport);
           if (!this.primaryPassedHealthCheck) {
             this.storeSession(`phx:fallback:${fallbackTransportName2}`, "true");
           }
           return this.log("transport", `established ${fallbackTransportName2} fallback`);
         }
+        if (!isCurrent()) {
+          return;
+        }
+        established = true;
         clearTimeout(this.fallbackTimer);
         this.fallbackTimer = setTimeout(fallback, fallbackThreshold);
         this.ping((rtt) => {
@@ -1428,15 +1579,25 @@
         });
       });
       this.transportConnect();
+      connectClock = this.connectClock;
+    }
+    /**
+     * @private
+     *
+     * Stops the fallback of the current connection attempt, see connectWithFallback
+     */
+    cancelFallback() {
+      clearTimeout(this.fallbackTimer);
+      this.off([this.fallbackRef, this.fallbackErrorRef]);
     }
     clearHeartbeats() {
       clearTimeout(this.heartbeatTimer);
       clearTimeout(this.heartbeatTimeoutTimer);
+      this.pendingHeartbeatRef = null;
     }
     onConnOpen() {
       if (this.hasLogger()) this.log("transport", `${this.transportName(this.transport)} connected to ${this.endPointURL()}`);
       this.closeWasClean = false;
-      this.disconnecting = false;
       this.establishedConnections++;
       this.flushSendBuffer();
       this.reconnectTimer.reset();
@@ -1448,52 +1609,81 @@
      */
     heartbeatTimeout() {
       if (this.pendingHeartbeatRef) {
+        const connection = this.connection;
         this.pendingHeartbeatRef = null;
         if (this.hasLogger()) {
           this.log("transport", "heartbeat timeout. Attempting to re-establish connection");
         }
-        this.triggerChanError("heartbeat_timeout");
         this.closeWasClean = false;
-        this.teardown(() => this.reconnectTimer.scheduleTimeout(), WS_CLOSE_NORMAL, "heartbeat timeout");
+        if (connection) {
+          connection.close(WS_CLOSE_NORMAL, "heartbeat timeout");
+        }
+        if (!this.stillUses(connection)) {
+          return;
+        }
+        this.triggerChanError("heartbeat_timeout");
+        if (!this.stillUses(connection)) {
+          return;
+        }
+        this.teardownAndReconnect(() => this.reconnectTimer.scheduleTimeout());
       }
     }
     resetHeartbeat() {
       if (this.conn && this.conn.skipHeartbeat) {
         return;
       }
-      this.pendingHeartbeatRef = null;
       this.clearHeartbeats();
       this.heartbeatTimer = setTimeout(() => this.sendHeartbeat(), this.heartbeatIntervalMs);
     }
+    /**
+     * @private
+     *
+     * Tears down the current connection to reconnect afterwards, unless the socket was
+     * disconnected or connected again in the meantime, which takes precedence.
+     */
+    teardownAndReconnect(reconnect) {
+      const connection = this.connection;
+      const connectClock = this.connectClock;
+      this.teardown(() => {
+        if (connectClock !== this.connectClock || connection && connection.ended) {
+          return;
+        }
+        reconnect();
+      });
+    }
+    /**
+     * @private
+     *
+     * Whether the socket still uses the connection and did not give up on it. User callbacks
+     * can disconnect or connect, so code continuing after them checks this first.
+     */
+    stillUses(connection) {
+      return this.connection === connection && !(connection && connection.ended);
+    }
     teardown(callback2, code, reason) {
-      if (!this.conn) {
+      const connection = this.connection;
+      if (!connection) {
         return callback2 && callback2();
       }
-      const connToClose = this.conn;
-      this.waitForBufferDone(connToClose, () => {
-        if (code) {
-          connToClose.close(code, reason || "");
-        } else {
-          connToClose.close();
+      this.clearHeartbeats();
+      this.waitForBufferDone(connection.transport, () => {
+        if (!connection.closing) {
+          const wasOpened = !connection.isConnecting();
+          connection.close(code, reason);
+          if (wasOpened) {
+            this.triggerChanError("connection_closed", connection);
+          }
         }
-        this.waitForSocketClosed(connToClose, () => {
-          if (this.conn === connToClose) {
-            this.conn.onopen = function() {
-            };
-            this.conn.onerror = function() {
-            };
-            this.conn.onmessage = function() {
-            };
-            this.conn.onclose = function() {
-            };
-            this.conn = null;
+        this.waitForSocketClosed(connection.transport, () => {
+          if (this.connection === connection) {
+            this.connection = null;
           }
           callback2 && callback2();
         });
       });
     }
     waitForBufferDone(conn, callback2, tries = 1) {
-      if (tries === 5 || !conn.bufferedAmount) {
+      if (tries === 5 || !conn.bufferedAmount || conn.readyState !== SOCKET_STATES.open) {
         callback2();
         return;
       }
@@ -1511,13 +1701,12 @@
       }, 150 * tries);
     }
     onConnClose(event) {
-      if (this.conn) this.conn.onclose = () => {
-      };
-      let closeCode = event && event.code;
+      const connection = this.connection;
       if (this.hasLogger()) this.log("transport", "close", event);
-      this.triggerChanError("connection_closed");
       this.clearHeartbeats();
-      if (!this.closeWasClean && closeCode !== 1e3) {
+      const closedByUs = !!(connection && connection.closing);
+      this.triggerChanError("connection_closed", connection);
+      if (this.stillUses(connection) && !closedByUs && !this.closeWasClean) {
         this.reconnectTimer.scheduleTimeout();
       }
       this.stateChangeCallbacks.close.forEach(([, callback2]) => callback2(event));
@@ -1526,21 +1715,34 @@
      * @private
      */
     onConnError(error) {
+      const connection = this.connection;
       if (this.hasLogger()) this.log("transport", "error", error);
       let transportBefore = this.transport;
       let establishedBefore = this.establishedConnections;
       this.stateChangeCallbacks.error.forEach(([, callback2]) => {
         callback2(error, transportBefore, establishedBefore);
       });
-      if (transportBefore === this.transport || establishedBefore > 0) {
-        this.triggerChanError("connection_error");
-      }
+      this.triggerChanError("connection_error", connection);
     }
     /**
      * @private
+     *
+     * Errors the channels, as they need to rejoin once the given connection stopped being open.
      */
-    triggerChanError(reason) {
-      this.channels.forEach((channel) => {
+    triggerChanError(reason, connection = this.connection) {
+      let erroredBefore = false;
+      if (connection && !connection.isOpen()) {
+        erroredBefore = connection.channelsErrored;
+        connection.channelsErrored = true;
+      }
+      const joins = this.channels.map((channel) => [channel, channel.joinRef()]);
+      joins.forEach(([channel, joinRef]) => {
+        if (channel.joinRef() !== joinRef) {
+          return;
+        }
+        if (connection && (erroredBefore || !connection.isCurrent()) && !connection.carried(channel, joinRef)) {
+          return;
+        }
         if (!(channel.isErrored() || channel.isLeaving() || channel.isClosed())) {
           channel.trigger(CHANNEL_EVENTS.error, { source: "transport", reason });
         }
@@ -1603,17 +1805,48 @@
     }
     /**
      * @param {Object} data
+     * @param {Channel} [channel] - The channel the push belongs to, if any
      */
-    push(data) {
+    push(data, channel) {
       if (this.hasLogger()) {
         let { topic, event, payload, ref, join_ref } = data;
         this.log("push", `${topic} ${event} (${join_ref}, ${ref})`, payload);
       }
       if (this.isConnected()) {
-        this.encode(data, (result) => this.conn.send(result));
+        this.send(data, channel);
       } else {
-        this.sendBuffer.push(() => this.encode(data, (result) => this.conn.send(result)));
+        this.sendBuffer.push(() => {
+          if (!this.isOutdated(data, channel)) {
+            this.send(data, channel);
+          }
+        });
       }
+    }
+    /**
+     * @private
+     */
+    send(data, channel) {
+      const connection = this.connection;
+      if (channel && data.event === CHANNEL_EVENTS.join) {
+        connection.joins.set(channel, data.join_ref);
+      }
+      this.encode(data, (result) => {
+        if (!connection.isCurrent() || !connection.isOpen()) {
+          return;
+        }
+        if (data.event !== CHANNEL_EVENTS.leave && this.isOutdated(data, channel)) {
+          return;
+        }
+        connection.transport.send(result);
+      });
+    }
+    /**
+     * @private
+     *
+     * Whether the push was made for an earlier join of its channel, or the channel left since.
+     */
+    isOutdated(data, channel) {
+      return !!channel && (data.join_ref !== channel.joinRef() || channel.isClosed());
     }
     /**
      * Return the next message ref, accounting for overflows
@@ -1643,24 +1876,35 @@
       }
     }
     onConnMessage(rawMessage) {
+      const connection = this.connection;
+      const wasOpen = connection && connection.isOpen();
       this.decode(rawMessage.data, (msg) => {
+        if (connection !== this.connection || wasOpen && !connection.isOpen()) {
+          return;
+        }
         let { topic, event, payload, ref, join_ref } = msg;
         if (ref && ref === this.pendingHeartbeatRef) {
           this.clearHeartbeats();
-          this.pendingHeartbeatRef = null;
           this.heartbeatTimer = setTimeout(() => this.sendHeartbeat(), this.heartbeatIntervalMs);
         }
         if (this.hasLogger()) this.log("receive", `${payload.status || ""} ${topic} ${event} ${ref && "(" + ref + ")" || ""}`, payload);
-        for (let i = 0; i < this.channels.length; i++) {
-          const channel = this.channels[i];
+        const channels = this.channels;
+        for (let i = 0; i < channels.length; i++) {
+          const channel = channels[i];
           if (!channel.isMember(topic, event, payload, join_ref)) {
             continue;
           }
           channel.trigger(event, payload, ref, join_ref);
         }
-        for (let i = 0; i < this.stateChangeCallbacks.message.length; i++) {
-          let [, callback2] = this.stateChangeCallbacks.message[i];
+        const callbacks = this.stateChangeCallbacks.message;
+        for (let i = 0; i < callbacks.length; i++) {
+          let [, callback2] = callbacks[i];
           callback2(msg);
+        }
+        const ping = ref && connection.pings.get(ref);
+        if (ping) {
+          connection.pings.delete(ref);
+          ping();
         }
       });
     }
@@ -1816,11 +2060,15 @@
       if (this.errored) {
         return;
       }
-      this.entry.view.cancelSubmit(this.entry.fileEl.form);
+      this.entry.view.cancelSubmit(this.entry.fileEl.form, {
+        reason: "upload-failed",
+        inputs: [this.entry.fileEl]
+      });
       this.uploadChannel.leave();
       this.errored = true;
       this.chunkTimer != null && clearTimeout(this.chunkTimer);
       if (reason === "writer_error") {
+        this.entry.fail(reason, false);
         return;
       }
       this.entry.error(reason);
@@ -1838,21 +2086,23 @@
         this.offset,
         this.chunkSize + this.offset
       );
+      const onError = () => {
+        this.entry.view.logError(
+          "upload.read-failed",
+          "Read error: " + (reader.error || "aborted"),
+          { entry: this.entry, offset: this.offset }
+        );
+        this.error("failed");
+      };
+      reader.onerror = onError;
+      reader.onabort = onError;
       reader.onload = (e) => {
-        if (e.target?.error === null) {
-          this.offset += /** @type {ArrayBuffer} */
-          e.target.result.byteLength;
-          this.pushChunk(
-            /** @type {ArrayBuffer} */
-            e.target.result
-          );
-        } else {
-          return this.entry.view.logError(
-            "upload.read-failed",
-            "Read error: " + e.target?.error,
-            { entry: this.entry, offset: this.offset }
-          );
-        }
+        this.offset += /** @type {ArrayBuffer} */
+        e.target.result.byteLength;
+        this.pushChunk(
+          /** @type {ArrayBuffer} */
+          e.target.result
+        );
       };
       reader.readAsArrayBuffer(blob);
     }
@@ -1868,7 +2118,7 @@
             this.liveSocket.getLatencySim() || 0
           );
         }
-      }).receive("error", ({ reason }) => this.error(reason));
+      }).receive("error", ({ reason }) => this.error(reason)).receive("timeout", () => this.error("timeout"));
     }
   };
   var dispatchDiagnostic = (diagnostic) => {
@@ -2055,12 +2305,6 @@
       const expires = typeof maxAgeSeconds === "number" ? ` max-age=${maxAgeSeconds};` : "";
       document.cookie = `${name}=${value};${expires} path=/`;
     },
-    getCookie(name) {
-      return document.cookie.replace(
-        new RegExp(`(?:(?:^|.*;s*)${name}s*=s*([^;]*).*$)|^.*$`),
-        "$1"
-      );
-    },
     deleteCookie(name) {
       document.cookie = `${name}=; max-age=-1; path=/`;
     },
@@ -2119,11 +2363,6 @@
       }
       return array;
     },
-    childNodeLength(html) {
-      const template = document.createElement("template");
-      template.innerHTML = html;
-      return template.content.childElementCount;
-    },
     isUploadInput(el) {
       return el.type === "file" && el.getAttribute(PHX_UPLOAD_REF) !== null;
     },
@@ -2157,11 +2396,12 @@
     isPhxDestroyed(node) {
       return node.id && DOM.private(node, "destroyed") ? true : false;
     },
-    wantsNewTab(e) {
+    wantsNewTab(e, el = e.target) {
       const wantsNewTab = e.ctrlKey || e.shiftKey || e.metaKey || e.button && e.button === 1;
-      const isDownload = e.target instanceof HTMLAnchorElement && e.target.hasAttribute("download");
-      const isTargetBlank = e.target.hasAttribute("target") && e.target.getAttribute("target").toLowerCase() === "_blank";
-      const isTargetNamedTab = e.target.hasAttribute("target") && !e.target.getAttribute("target").startsWith("_");
+      const isDownload = el instanceof HTMLAnchorElement && el.hasAttribute("download");
+      const target = e.submitter && e.submitter.hasAttribute("formtarget") ? e.submitter.getAttribute("formtarget") : el.getAttribute("target");
+      const isTargetBlank = target !== null && target.toLowerCase() === "_blank";
+      const isTargetNamedTab = target !== null && target !== "" && !target.startsWith("_");
       return wantsNewTab || isTargetBlank || isDownload || isTargetNamedTab;
     },
     isUnloadableFormSubmit(e) {
@@ -2540,7 +2780,7 @@
       }
     },
     hasSelectionRange(el) {
-      return el.setSelectionRange && (el.type === "text" || el.type === "textarea");
+      return el.setSelectionRange && ["text", "textarea", "search", "url", "tel", "password"].includes(el.type);
     },
     restoreFocus(focused, selectionStart, selectionEnd) {
       if (focused instanceof HTMLSelectElement) {
@@ -2649,11 +2889,6 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         return typeof defaultVal === "function" ? defaultVal() : defaultVal;
       }
     },
-    deleteSticky(el, name) {
-      this.updatePrivate(el, "sticky", [], (ops) => {
-        return ops.filter(([existingName, _]) => existingName !== name);
-      });
-    },
     putSticky(el, name, op) {
       const stashedResult = op(el);
       this.updatePrivate(el, "sticky", [], (ops) => {
@@ -2712,6 +2947,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       this.meta = null;
       this._isCancelled = false;
       this._isDone = false;
+      this._isErrored = false;
       this._progress = 0;
       this._lastProgressSent = -1;
       this._onCancel = function() {
@@ -2759,11 +2995,10 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       return this._isDone;
     }
     error(reason = "failed") {
-      this.fileEl.removeEventListener(PHX_LIVE_FILE_UPDATED, this._onElUpdated);
-      this.view.pushFileProgress(this.fileEl, this.ref, { error: reason });
-      if (!this.isAutoUpload()) {
-        LiveUploader.clearFiles(this.fileEl);
-      }
+      this.fail(reason, true);
+    }
+    isErrored() {
+      return this._isErrored;
     }
     isAutoUpload() {
       return this.autoUpload;
@@ -2776,8 +3011,30 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       }
     }
     //private
+    // notifyServer is false when the server already recorded the failure,
+    // for example for upload writer errors
+    fail(reason, notifyServer) {
+      if (this._isErrored) {
+        return;
+      }
+      this._isErrored = true;
+      this._isDone = true;
+      this.fileEl.removeEventListener(PHX_LIVE_FILE_UPDATED, this._onElUpdated);
+      try {
+        if (notifyServer) {
+          this.view.pushFileProgress(this.fileEl, this.ref, { error: reason });
+        }
+        if (!this.isAutoUpload()) {
+          LiveUploader.clearFiles(this.fileEl);
+        }
+      } finally {
+        this._onDone();
+      }
+    }
     onDone(callback2) {
       this._onDone = () => {
+        this._onDone = function() {
+        };
         this.fileEl.removeEventListener(PHX_LIVE_FILE_UPDATED, this._onElUpdated);
         callback2();
       };
@@ -2856,8 +3113,8 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       });
       return active > 0;
     }
-    static hasUploadErrors(formEl) {
-      return dom_default.findUploadInputs(formEl).some(
+    static inputsWithUploadErrors(formEl) {
+      return dom_default.findUploadInputs(formEl).filter(
         (input) => (input.getAttribute(PHX_ERROR_REFS) || "") !== ""
       );
     }
@@ -2918,8 +3175,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       }
     }
     static activeFileInputs(formEl) {
-      const fileInputs = dom_default.findUploadInputs(formEl);
-      return Array.from(fileInputs).filter(
+      return dom_default.findUploadInputs(formEl).filter(
         (el) => el.files && this.activeFiles(el).length > 0
       );
     }
@@ -2929,8 +3185,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       );
     }
     static inputsAwaitingPreflight(formEl) {
-      const fileInputs = dom_default.findUploadInputs(formEl);
-      return Array.from(fileInputs).filter(
+      return dom_default.findUploadInputs(formEl).filter(
         (input) => this.filesAwaitingPreflight(input).length > 0
       );
     }
@@ -3270,13 +3525,19 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       if (this.errorRefsWas !== newErrorRefs) {
         this.errorRefsWas = newErrorRefs;
         if (newErrorRefs !== "") {
-          this.__view().cancelSubmit(this.el.form);
+          this.__view().cancelSubmit(this.el.form, {
+            reason: "entry-errors",
+            inputs: [this.el]
+          });
         }
       }
       if (this.preflightedWas !== newPreflights) {
         this.preflightedWas = newPreflights;
         if (newPreflights === "") {
-          this.__view().cancelSubmit(this.el.form);
+          this.__view().cancelSubmit(this.el.form, {
+            reason: "entries-removed",
+            inputs: [this.el]
+          });
         }
       }
       if (this.activeRefs() === "") {
@@ -3333,20 +3594,21 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     InfiniteScroll
   };
   var hooks_default = Hooks;
-  var ElementRef = class {
+  var ElementRef = class _ElementRef {
     static onUnlock(el, callback2) {
-      if (!dom_default.isLocked(el) && !el.closest(`[${PHX_REF_LOCK}]`)) {
+      const closestLock = el.closest(`[${PHX_REF_LOCK}]`);
+      if (!closestLock) {
         return callback2();
       }
-      const closestLock = el.closest(`[${PHX_REF_LOCK}]`);
-      const ref = closestLock.closest(`[${PHX_REF_LOCK}]`).getAttribute(PHX_REF_LOCK);
-      closestLock.addEventListener(
-        `phx:undo-lock:${ref}`,
-        () => {
-          callback2();
-        },
-        { once: true }
-      );
+      const ref = closestLock.getAttribute(PHX_REF_LOCK);
+      const event = `phx:undo-lock:${ref}`;
+      const onUnlock = (e) => {
+        if (e.target !== closestLock)
+          return;
+        closestLock.removeEventListener(event, onUnlock);
+        _ElementRef.onUnlock(el, callback2);
+      };
+      closestLock.addEventListener(event, onUnlock);
     }
     constructor(el) {
       this.el = el;
@@ -3885,7 +4147,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
           var beforeUpdateResult = onBeforeElUpdated(fromEl, toEl);
           if (beforeUpdateResult === false) {
             return;
-          } else if (beforeUpdateResult instanceof HTMLElement) {
+          } else if (beforeUpdateResult instanceof Element) {
             fromEl = beforeUpdateResult;
             indexTree(fromEl);
           }
@@ -4134,7 +4396,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       let targetContainer = this.targetContainer;
       if (this.targetCID) {
         const closestLock = targetContainer.closest(`[${PHX_REF_LOCK}]`);
-        if (closestLock && !closestLock.isSameNode(targetContainer)) {
+        if (closestLock && !closestLock.isSameNode(targetContainer) && view.ownsElement(closestLock)) {
           const clonedTree = dom_default.private(closestLock, PHX_REF_LOCK);
           if (clonedTree) {
             targetContainer = clonedTree.querySelector(
@@ -4195,15 +4457,15 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
             } else if (streamAt === -1) {
               const lastChild = parent.lastElementChild;
               if (lastChild && !lastChild.hasAttribute(PHX_STREAM_REF)) {
-                const nonStreamChild = Array.from(parent.children).find(
-                  (c) => !c.hasAttribute(PHX_STREAM_REF)
+                const nonStreamChild = parent.querySelector(
+                  `:scope > :not([${PHX_STREAM_REF}])`
                 );
-                parent.insertBefore(child, nonStreamChild ?? null);
+                parent.insertBefore(child, nonStreamChild);
               } else {
                 parent.appendChild(child);
               }
             } else if (streamAt > 0) {
-              const sibling = Array.from(parent.children)[streamAt];
+              const sibling = parent.children[streamAt] ?? null;
               parent.insertBefore(child, sibling);
             }
           },
@@ -4644,9 +4906,6 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         return;
       dom_default.putPrivate(fromEl, PHX_REF_LOCK, dom_default.private(toEl, PHX_REF_LOCK));
     }
-    indexOf(parent, child) {
-      return Array.from(parent.children).indexOf(child);
-    }
     teleport(el, morph) {
       const targetSelector = el.getAttribute(PHX_PORTAL);
       const portalContainer = document.querySelector(targetSelector);
@@ -4672,12 +4931,15 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         }
         portalTarget = existing;
       } else {
-        portalTarget = document.createElement(toTeleport.tagName);
+        portalTarget = document.createElementNS(
+          toTeleport.namespaceURI,
+          toTeleport.localName
+        );
         portalContainer.appendChild(portalTarget);
       }
       toTeleport.setAttribute(PHX_TELEPORTED_REF, this.view.id);
       toTeleport.setAttribute(PHX_TELEPORTED_SRC, el.id);
-      morph(portalTarget, toTeleport, true);
+      morph(portalTarget, toTeleport.cloneNode(true), true);
       toTeleport.removeAttribute(PHX_TELEPORTED_REF);
       toTeleport.removeAttribute(PHX_TELEPORTED_SRC);
       this.view.pushPortalElementId(toTeleport.id);
@@ -5274,8 +5536,8 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       }
       if (rendered[STREAM]) {
         const stream = rendered[STREAM];
-        const [_ref, _inserts, deleteIds, reset] = stream || [null, {}, [], null];
-        if (stream !== void 0 && (rendered[KEYED][KEYED_COUNT] > 0 || deleteIds.length > 0 || reset)) {
+        const [_ref, _inserts, deleteIds, reset] = stream;
+        if (rendered[KEYED][KEYED_COUNT] > 0 || deleteIds.length > 0 || reset) {
           delete rendered[STREAM];
           rendered[KEYED] = {
             [KEYED_COUNT]: 0
@@ -5292,7 +5554,9 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
           output.onlyCids
         );
         output.buffer.write(str);
-        output.streams = /* @__PURE__ */ new Set([...output.streams, ...streams]);
+        for (const s of streams) {
+          output.streams.add(s);
+        }
       } else if (isObject(rendered)) {
         this.toOutputBuffer(rendered, templates, output, changeTracking, {});
       } else {
@@ -5467,18 +5731,12 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       );
     },
     exec_focus(e, eventType, phxEvent, view, sourceEl, el) {
-      aria_default.attemptFocus(el);
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => aria_default.attemptFocus(el));
-      });
+      this.focusWithRetry(() => aria_default.attemptFocus(el));
     },
     exec_focus_first(e, eventType, phxEvent, view, sourceEl, el) {
-      aria_default.focusFirstInteractive(el) || aria_default.focusFirst(el);
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(
-          () => aria_default.focusFirstInteractive(el) || aria_default.focusFirst(el)
-        );
-      });
+      this.focusWithRetry(
+        () => aria_default.focusFirstInteractive(el) || aria_default.focusFirst(el)
+      );
     },
     exec_push_focus(e, eventType, phxEvent, view, sourceEl, el) {
       if (view.isDestroyed()) {
@@ -5493,11 +5751,19 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       const focusEntry = focusStack.pop();
       if (focusEntry) {
         const { el } = focusEntry;
-        el.focus();
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => el.focus());
-        });
+        this.focusWithRetry(() => el.focus());
       }
+    },
+    focusWithRetry(callback2) {
+      callback2();
+      const activeElement = document.activeElement;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (document.activeElement === activeElement) {
+            callback2();
+          }
+        });
+      });
     },
     dropFocus(view) {
       let dropped = 0;
@@ -5931,10 +6197,10 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       },
       push(el, type, opts = {}) {
         liveSocket2.withinOwners(el, (view) => {
-          const data = opts.value || {};
-          delete opts.value;
+          const { value, ...rest } = opts;
+          const data = value || {};
           let e = new CustomEvent("phx:exec", { detail: { sourceElement: el } });
-          js_default.exec(e, eventType, type, view, el, ["push", { data, ...opts }]);
+          js_default.exec(e, eventType, type, view, el, ["push", { data, ...rest }]);
         });
       },
       navigate(href, opts = {}) {
@@ -6101,8 +6367,10 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
     /** @internal */
     __disconnected() {
-      this.__isDisconnected = true;
-      this.disconnected();
+      if (!this.__isDisconnected) {
+        this.__isDisconnected = true;
+        this.disconnected();
+      }
     }
     js() {
       return {
@@ -6370,6 +6638,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     hideLoader() {
       this.loaderTimer != null && clearTimeout(this.loaderTimer);
       this.disconnectedTimer != null && clearTimeout(this.disconnectedTimer);
+      this.disconnectedTimer = null;
       this.setContainerClasses(PHX_CONNECTED_CLASS);
       this.execAll(this.binding("connected"));
     }
@@ -6778,7 +7047,8 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       if (formsToRecover.length === 0) {
         return callback2();
       }
-      formsToRecover.forEach(([oldForm, newForm], i) => {
+      let formsRecovered = 0;
+      formsToRecover.forEach(([oldForm, newForm]) => {
         this.pendingForms.add(newForm.id);
         this.pushFormRecovery(
           oldForm,
@@ -6786,7 +7056,8 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
           template.content.firstElementChild,
           () => {
             this.pendingForms.delete(newForm.id);
-            if (i === formsToRecover.length - 1) {
+            formsRecovered++;
+            if (formsRecovered === formsToRecover.length) {
               callback2();
             }
           }
@@ -6850,7 +7121,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     update(diff, events, isPending = false) {
       if (this.isJoinPending() || this.liveSocket.hasPendingLink() && this.root.isMain()) {
         if (!isPending) {
-          this.pendingDiffs.push({ diff, events });
+          this.pendingDiffs.push({ diff, events, joinCount: this.joinCount });
         }
         return false;
       }
@@ -6987,7 +7258,20 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
     applyPendingUpdates() {
       this.pendingDiffs = this.pendingDiffs.filter(
-        ({ diff, events }) => !this.update(diff, events, true)
+        ({ diff, events, joinCount }) => {
+          if (joinCount !== this.joinCount) {
+            this.log(
+              "update",
+              () => ["discarded diff from previous join", diff],
+              {
+                code: "view.stale-diff-discarded",
+                metadata: () => ({ joinCount, currentJoinCount: this.joinCount })
+              }
+            );
+            return false;
+          }
+          return !this.update(diff, events, true);
+        }
       );
       this.eachChild((child) => child.applyPendingUpdates());
     }
@@ -7236,7 +7520,11 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       this.delayedDisconnected();
     }
     delayedDisconnected() {
+      if (this.disconnectedTimer != null) {
+        return;
+      }
       this.disconnectedTimer = setTimeout(() => {
+        this.disconnectedTimer = null;
         this.execAll(this.binding("disconnected"));
       }, this.liveSocket.disconnectedTimeout);
     }
@@ -7791,13 +8079,14 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
                   inputEl.form,
                   phxEvent,
                   targetCtx,
-                  ref,
-                  cid,
                   (_uploads) => {
                     callback2 && callback2(result.resp);
-                    this.triggerAwaitingSubmit(inputEl.form, phxEvent);
+                    this.triggerAwaitingSubmit(inputEl.form);
                     this.undoRefs(ref, phxEvent);
-                  }
+                  },
+                  // the change event itself was delivered, so there is no
+                  // submit to report; only release the form
+                  () => this.undoRefs(ref, phxEvent)
                 );
               }
             });
@@ -7818,11 +8107,11 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         }
       });
     }
-    triggerAwaitingSubmit(formEl, phxEvent) {
+    triggerAwaitingSubmit(formEl) {
       const awaitingSubmit = this.getScheduledSubmit(formEl);
       if (awaitingSubmit) {
         const [_el, _ref, _opts, callback2] = awaitingSubmit;
-        this.cancelSubmit(formEl, phxEvent);
+        this.cancelSubmit(formEl);
         callback2();
       }
     }
@@ -7831,16 +8120,53 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         ([el, _ref, _opts, _callback]) => el.isSameNode(formEl)
       );
     }
-    scheduleSubmit(formEl, ref, opts, callback2) {
+    scheduleSubmit(formEl, ref, opts, callback2, phxEvent) {
       if (this.getScheduledSubmit(formEl)) {
         return true;
       }
-      this.formSubmits.push([formEl, ref, opts, callback2]);
+      this.formSubmits.push([formEl, ref, opts, callback2, phxEvent]);
     }
-    cancelSubmit(formEl, phxEvent) {
+    // a submit is intentionally dropped when its uploads cannot complete, but
+    // without a signal the click looks like a no-op to the developer, so we
+    // emit a debug diagnostic naming the uploads and why the submit was not sent
+    logBlockedSubmit(formEl, phxEvent, reason, inputs, scheduled = false) {
+      const uploads = inputs.map((input) => input.name);
+      const what = scheduled ? `scheduled ${phxEvent}` : phxEvent;
+      this.log(
+        "upload",
+        () => [
+          `${what} not sent (${reason}): ${uploads.join(", ")}`,
+          { reason, uploads }
+        ],
+        {
+          code: "upload.submit-blocked",
+          metadata: () => ({
+            event: phxEvent,
+            reason,
+            uploads,
+            scheduled,
+            formEl
+          })
+        }
+      );
+    }
+    // cancels the submit scheduled while uploads were in progress, if any, and
+    // undoes its refs. `blocked` says why the submit is dropped for good; it is
+    // omitted when the scheduled submit is dequeued to be sent (see
+    // triggerAwaitingSubmit)
+    cancelSubmit(formEl, blocked) {
       this.formSubmits = this.formSubmits.filter(
-        ([el, ref, _opts, _callback]) => {
+        ([el, ref, _opts, _callback, phxEvent]) => {
           if (el.isSameNode(formEl)) {
+            if (blocked) {
+              this.logBlockedSubmit(
+                formEl,
+                phxEvent,
+                blocked.reason,
+                blocked.inputs,
+                true
+              );
+            }
             this.undoRefs(ref, phxEvent);
             return false;
           } else {
@@ -7897,8 +8223,10 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       });
       dom_default.putPrivate(formEl, "submitter", submitter);
       const cid = this.targetComponentID(formEl, targetCtx);
-      if (LiveUploader.hasUploadErrors(formEl)) {
-        return this.cancelSubmit(formEl, phxEvent);
+      const inputsWithErrors = LiveUploader.inputsWithUploadErrors(formEl);
+      if (inputsWithErrors.length > 0) {
+        this.logBlockedSubmit(formEl, phxEvent, "entry-errors", inputsWithErrors);
+        return this.cancelSubmit(formEl);
       } else if (LiveUploader.hasUploadsInProgress(formEl)) {
         const [ref, _els] = refGenerator();
         const push = () => this.pushFormSubmit(
@@ -7909,39 +8237,50 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
           opts,
           onReply
         );
-        return this.scheduleSubmit(formEl, ref, opts, push);
+        return this.scheduleSubmit(formEl, ref, opts, push, phxEvent);
       } else if (LiveUploader.inputsAwaitingPreflight(formEl).length > 0) {
         const [ref, els] = refGenerator();
         const proxyRefGen = () => [ref, els, opts];
-        this.uploadFiles(formEl, phxEvent, targetCtx, ref, cid, (_uploads) => {
-          if (LiveUploader.inputsAwaitingPreflight(formEl).length > 0) {
-            return this.undoRefs(ref, phxEvent);
-          }
-          const meta = this.extractMeta(formEl, {}, opts.value);
-          const formData = this.serializeForm(formEl, { submitter });
-          this.pushWithReply(proxyRefGen, "event", {
-            type: "form",
-            event: phxEvent,
-            value: formData,
-            meta,
-            cid
-          }).then((result) => {
-            if (result.type === "ok") {
-              onReply(result.resp);
-            } else {
-              this.logError(
-                "event.submit-push-failed",
-                "Failed to push form submit",
-                {
-                  error: result.error,
-                  phxEvent,
-                  formEl
-                },
-                result.context
-              );
+        const onBlocked = (reason, inputs) => {
+          this.logBlockedSubmit(formEl, phxEvent, reason, inputs);
+          this.undoRefs(ref, phxEvent);
+        };
+        this.uploadFiles(
+          formEl,
+          phxEvent,
+          targetCtx,
+          (_uploads) => {
+            const awaitingPreflight = LiveUploader.inputsAwaitingPreflight(formEl);
+            if (awaitingPreflight.length > 0) {
+              return onBlocked("awaiting-preflight", awaitingPreflight);
             }
-          });
-        });
+            const meta = this.extractMeta(formEl, {}, opts.value);
+            const formData = this.serializeForm(formEl, { submitter });
+            this.pushWithReply(proxyRefGen, "event", {
+              type: "form",
+              event: phxEvent,
+              value: formData,
+              meta,
+              cid
+            }).then((result) => {
+              if (result.type === "ok") {
+                onReply(result.resp);
+              } else {
+                this.logError(
+                  "event.submit-push-failed",
+                  "Failed to push form submit",
+                  {
+                    error: result.error,
+                    phxEvent,
+                    formEl
+                  },
+                  result.context
+                );
+              }
+            });
+          },
+          onBlocked
+        );
       } else if (!(formEl.hasAttribute(PHX_REF_SRC) && formEl.classList.contains("phx-submit-loading"))) {
         const meta = this.extractMeta(formEl, {}, opts.value);
         const formData = this.serializeForm(formEl, { submitter });
@@ -7969,23 +8308,50 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         });
       }
     }
-    uploadFiles(formEl, phxEvent, targetCtx, ref, cid, onComplete) {
+    // onComplete is called once the uploads of every input are done; onBlocked
+    // is called instead when a preflight was rejected or failed, or an upload
+    // failed, with the reason and the inputs involved. The caller is responsible
+    // for releasing the form. When inputs are blocked for different reasons, the
+    // first reason seen is reported with its inputs; the others have their own
+    // logs.
+    uploadFiles(formEl, phxEvent, targetCtx, onComplete, onBlocked) {
       const joinCountAtUpload = this.joinCount;
       const inputEls = LiveUploader.activeFileInputs(formEl);
       let numFileInputsInProgress = inputEls.length;
+      const blocked = [];
+      const inputBlocked = (reason, inputEl) => {
+        const group = blocked.find((b) => b.reason === reason);
+        if (group) {
+          group.inputs.push(inputEl);
+        } else {
+          blocked.push({ reason, inputs: [inputEl] });
+        }
+      };
+      const inputDone = () => {
+        numFileInputsInProgress--;
+        if (numFileInputsInProgress > 0) {
+          return;
+        }
+        if (blocked.length > 0) {
+          this.cancelSubmit(formEl, blocked[0]);
+          onBlocked(blocked[0].reason, blocked[0].inputs);
+        } else {
+          onComplete();
+        }
+      };
       inputEls.forEach((inputEl) => {
         const uploader = new LiveUploader(inputEl, this, () => {
           this.activeUploaders.delete(uploader);
-          numFileInputsInProgress--;
-          if (numFileInputsInProgress === 0) {
-            onComplete();
+          if (uploader.entries().some((entry) => entry.isErrored())) {
+            inputBlocked("upload-failed", inputEl);
           }
+          inputDone();
         });
         this.activeUploaders.add(uploader);
         const entries = uploader.entries().map((entry) => entry.toPreflightPayload());
         if (entries.length === 0) {
           this.activeUploaders.delete(uploader);
-          numFileInputsInProgress--;
+          inputDone();
           return;
         }
         const payload = {
@@ -8013,12 +8379,13 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
               }
             });
             if (result.resp.error || Object.keys(result.resp.entries).length === 0) {
-              this.undoRefs(ref, phxEvent);
               const errors = result.resp.error || [];
               errors.map(([entry_ref, reason]) => {
                 this.handleFailedEntryPreflight(entry_ref, reason, uploader);
               });
               this.activeUploaders.delete(uploader);
+              inputBlocked("preflight-rejected", inputEl);
+              inputDone();
             } else {
               const onError = (callback2) => {
                 this.channel.onError(() => {
@@ -8030,6 +8397,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
               uploader.initAdapterUpload(result.resp, onError, this.liveSocket);
             }
           } else {
+            uploader.cancel();
             this.activeUploaders.delete(uploader);
             this.logError(
               "upload.push-failed",
@@ -8041,6 +8409,8 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
               },
               result.context
             );
+            inputBlocked("preflight-failed", inputEl);
+            inputDone();
           }
         });
       });
@@ -8357,7 +8727,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
      * Returns the version of the LiveView client.
      */
     version() {
-      return "1.2.10";
+      return "1.2.13";
     }
     /**
      * Returns true if profiling is enabled. See {@link enableProfiling} and {@link disableProfiling}.
@@ -9285,7 +9655,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
             PHX_LIVE_LINK
           );
           const type = target && target.getAttribute(PHX_LIVE_LINK);
-          if (!type || !this.isConnected() || !this.main || dom_default.wantsNewTab(e)) {
+          if (!type || !this.isConnected() || !this.main || dom_default.wantsNewTab(e, target)) {
             return;
           }
           const href = target.href instanceof SVGAnimatedString ? target.href.baseVal : target.href;
@@ -10240,7 +10610,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
   };
 
-  // assets/node_modules/chart.js/dist/chunks/helpers.dataset.js
+  // assets/node_modules/chart.js/dist/chunks/index.js
   function noop2() {
   }
   var uid = /* @__PURE__ */ (() => {
@@ -12200,10 +12570,12 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       canvas.style.height = `${chart.height}px`;
       canvas.style.width = `${chart.width}px`;
     }
-    if (chart.currentDevicePixelRatio !== pixelRatio || canvas.height !== deviceHeight || canvas.width !== deviceWidth) {
+    const canvasHeight = Math.floor(deviceHeight);
+    const canvasWidth = Math.floor(deviceWidth);
+    if (chart.currentDevicePixelRatio !== pixelRatio || canvas.height !== canvasHeight || canvas.width !== canvasWidth) {
       chart.currentDevicePixelRatio = pixelRatio;
-      canvas.height = deviceHeight;
-      canvas.width = deviceWidth;
+      canvas.height = canvasHeight;
+      canvas.width = canvasWidth;
       chart.ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       return true;
     }
@@ -13186,7 +13558,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     for (const parsed of items) {
       const stacks = parsed._stacks;
       if (!stacks || stacks[axis] === void 0 || stacks[axis][datasetIndex] === void 0) {
-        return;
+        continue;
       }
       delete stacks[axis][datasetIndex];
       if (stacks[axis]._visualValues !== void 0 && stacks[axis]._visualValues[datasetIndex] !== void 0) {
@@ -16146,7 +16518,9 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         translation: [
           titleX,
           titleY
-        ]
+        ],
+        strokeColor: title.strokeColor,
+        strokeWidth: title.strokeWidth
       });
     }
     draw(chartArea) {
@@ -16850,7 +17224,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
     return false;
   }
-  var version = "4.5.1";
+  var version = "4.6.1";
   var KNOWN_POSITIONS = [
     "top",
     "bottom",
@@ -22317,12 +22691,12 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
    * Released under the MIT License
    *)
 
-chart.js/dist/chunks/helpers.dataset.js:
+chart.js/dist/chunks/index.js:
 chart.js/dist/chart.js:
   (*!
-   * Chart.js v4.5.1
+   * Chart.js v4.6.1
    * https://www.chartjs.org
-   * (c) 2025 Chart.js Contributors
+   * (c) 2026 Chart.js Contributors
    * Released under the MIT License
    *)
 */
