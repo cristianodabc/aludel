@@ -105,7 +105,7 @@ defmodule Aludel.MixProject do
       {:ecto, "~> 3.13"},
       {:ecto_sql, "~> 3.13"},
       {:postgrex, ">= 0.0.0"},
-      {:phoenix_html, "~> 4.1"},
+      {:phoenix_html, "~> 4.4"},
       {:phoenix_live_view, "~> 1.2.1"},
       {:plug_crypto, ">= 2.2.1 and < 3.0.0"},
       {:lazy_html, "~> 0.1.13", only: :test},
