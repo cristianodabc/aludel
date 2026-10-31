@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+- Require ReqLLM 1.29.0, Plug.Crypto 2.2.1, jose 1.11.13, Phoenix.HTML 4.4.0, and standalone Bandit 1.14.1 or newer to resolve published advisories.
+
+### Changed
+- Refresh llm_db, Phoenix, LiveView, JSV, Splode, and Chart.js dependencies across the library and standalone dashboard.
+
 ## [0.8.5] - 2026-10-20
 
 - Security updates
