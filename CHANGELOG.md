@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.6] - 2026-10-31
+
 ### Security
 - Require ReqLLM 1.29.0, Plug.Crypto 2.2.1, jose 1.11.13, Phoenix.HTML 4.4.0, and standalone Bandit 1.14.1 or newer to resolve published advisories.
 
