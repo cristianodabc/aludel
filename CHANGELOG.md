@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.7] - 2026-11-16
+
 ### Security
 - Update JSV and Ecto to resolve EEF-CVE-2026-117680 and EEF-CVE-2026-118391.
 

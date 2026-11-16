@@ -4,7 +4,7 @@ defmodule Aludel.MixProject do
   def project do
     [
       app: :aludel,
-      version: "0.8.6",
+      version: "0.8.7",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
