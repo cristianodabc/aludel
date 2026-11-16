@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+- Update JSV and Ecto to resolve EEF-CVE-2026-117680 and EEF-CVE-2026-118391.
+
+### Changed
+- Update erlexec to 2.6.0 and llm_db to 2026.10.7 across the library and standalone dashboard.
+- Update standalone ReqLLM to 1.30.0.
+- Update development tooling: Sobelow to 0.18.1 and Tailwind to 0.5.2.
+
 ## [0.8.6] - 2026-10-31
 
 ### Security
