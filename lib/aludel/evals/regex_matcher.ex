@@ -37,6 +37,8 @@ defmodule Aludel.Evals.RegexMatcher do
     {:error, :invalid_pattern}
   end
 
+  # Eval authors supply the pattern; size, match, recursion and timeout limits bound its cost.
+  # sobelow_skip ["DOS.Regex"]
   defp compile(pattern)
        when is_binary(pattern) and byte_size(pattern) <= @max_pattern_bytes do
     case Regex.compile(pattern) do
