@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.8] - 2026-11-17
+
 ### Security
 - Update Plug to 1.20.4 across the library and standalone dashboard to resolve EEF-CVE-2026-120287 (GHSA-qj4r-jh2r-rw3f).
 
