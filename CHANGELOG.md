@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+- Update Plug to 1.20.4 across the library and standalone dashboard to resolve EEF-CVE-2026-120287 (GHSA-qj4r-jh2r-rw3f).
+
+### Changed
+- Update ReqLLM to 1.30.0 and llm_db to 2026.11.2 in the library dependency lock.
+- Update Zoi to 0.19.0, Telemetry to 1.4.3, and NimblePool to 1.2.0 in the library dependency lock.
+- Update development tooling: lazy_html to 0.1.14 and Dialyxir to 1.4.9.
+
 ## [0.8.7] - 2026-11-16
 
 ### Security
